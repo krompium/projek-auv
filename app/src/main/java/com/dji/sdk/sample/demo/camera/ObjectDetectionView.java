@@ -42,6 +42,8 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView 
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
+        // Only hide action bar, don't change orientation
+        // Orientation change recreates the Activity and breaks navigation
         DJISampleApplication.getEventBus()
                 .post(new MainActivity.RequestStartFullScreenEvent());
     }

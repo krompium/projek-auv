@@ -144,10 +144,10 @@ public class YoloDetector {
             if (maxScore < CONFIDENCE_THRESHOLD || bestClass < 0) continue;
 
             // Box is in cx, cy, w, h format normalized to 640
-            float cx = output[0][i] / INPUT_SIZE;
-            float cy = output[1][i] / INPUT_SIZE;
-            float w  = output[2][i] / INPUT_SIZE;
-            float h  = output[3][i] / INPUT_SIZE;
+            float cx = output[0][i];
+            float cy = output[1][i];
+            float w  = output[2][i];
+            float h  = output[3][i];
 
             float left   = cx - w / 2f;
             float top    = cy - h / 2f;
