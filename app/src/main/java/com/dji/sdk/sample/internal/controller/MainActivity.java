@@ -259,12 +259,24 @@ public class MainActivity extends AppCompatActivity {
     public void onReceiveStartFullScreenRequest(RequestStartFullScreenEvent event) {
         getSupportActionBar().hide();
         setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
+
+        for (int i = 0; i < contentFrameLayout.getChildCount() - 1; i++) {
+            contentFrameLayout.getChildAt(i).setVisibility(View.GONE);
+        }
+
+        contentFrameLayout.setBackgroundColor(android.graphics.Color.BLACK);
     }
 
     @Subscribe
     public void onReceiveEndFullScreenRequest(RequestEndFullScreenEvent event) {
         setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
         getSupportActionBar().show();
+
+        for (int i = 0; i < contentFrameLayout.getChildCount(); i++) {
+            contentFrameLayout.getChildAt(i).setVisibility(View.VISIBLE);
+        }
+
+        contentFrameLayout.setBackgroundColor(android.graphics.Color.TRANSPARENT);
     }
 
     @Subscribe

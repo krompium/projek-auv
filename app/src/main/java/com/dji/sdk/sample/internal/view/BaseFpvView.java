@@ -33,6 +33,9 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
 
     private int frameCount = 0;
 
+    private int videoWidth = 1280;
+    private int videoHeight = 720;
+
     public BaseFpvView(Context context, AttributeSet attrs) {
         super(context, attrs);
         initUI();
@@ -97,18 +100,15 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
         // Get overlay from XML
         overlayView = findViewById(R.id.detection_overlay);
 
-        overlayView = findViewById(R.id.detection_overlay);
-        if (overlayView == null) {
-            android.widget.Toast.makeText(getContext(),
-                    "ERROR: overlayView is NULL!",
-                    android.widget.Toast.LENGTH_LONG).show();
-        } else {
-            android.widget.Toast.makeText(getContext(),
-                    "overlayView found OK",
-                    android.widget.Toast.LENGTH_SHORT).show();
-        }
-
         initSDKCallback();
+
+        // Ensure transform runs after layout is complete
+        post(new Runnable() {
+            @Override
+            public void run() {
+                updateTextureViewTransform();
+            }
+        });
     }
 
     private void initSDKCallback() {
@@ -125,14 +125,20 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
         if (codecManager == null) {
             codecManager = new DJICodecManager(
                     getContext().getApplicationContext(),
-                    surface, width, height,
+                    surface, 1280, 720,
                     UsbAccessoryService.VideoStreamSource.Camera);
-            // NO enabledYuvData here — that was killing the video display
         }
+        post(new Runnable() {
+            @Override
+            public void run() {
+                updateTextureViewTransform();
+            }
+        });
     }
 
     @Override
     public void onSurfaceTextureSizeChanged(SurfaceTexture surface, int width, int height) {
+        updateTextureViewTransform();
     }
 
     @Override
@@ -203,4 +209,22 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
             }
         });
     }
+
+    private void updateTextureViewTransform() {
+        if (mVideoSurface == null) return;
+
+        // Fill entire parent — no aspect ratio constraint
+        FrameLayout.LayoutParams videoParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT);
+        mVideoSurface.setLayoutParams(videoParams);
+
+        if (overlayView != null) {
+            FrameLayout.LayoutParams overlayParams = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT);
+            overlayView.setLayoutParams(overlayParams);
+        }
+    }
+
 }

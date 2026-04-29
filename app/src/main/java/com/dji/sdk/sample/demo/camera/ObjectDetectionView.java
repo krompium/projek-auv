@@ -46,12 +46,23 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView 
         // Orientation change recreates the Activity and breaks navigation
         DJISampleApplication.getEventBus()
                 .post(new MainActivity.RequestStartFullScreenEvent());
+        if (getContext() instanceof android.app.Activity) {
+            android.app.Activity activity = (android.app.Activity) getContext();
+            activity.getWindow().setFlags(
+                    android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN,
+                    android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        }
     }
 
     @Override
     protected void onDetachedFromWindow() {
         DJISampleApplication.getEventBus()
                 .post(new MainActivity.RequestEndFullScreenEvent());
+        if (getContext() instanceof android.app.Activity) {
+            android.app.Activity activity = (android.app.Activity) getContext();
+            activity.getWindow().clearFlags(
+                    android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        }
         super.onDetachedFromWindow();
     }
 }
