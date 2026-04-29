@@ -259,7 +259,9 @@ public class MainActivity extends AppCompatActivity {
     public void onReceiveStartFullScreenRequest(RequestStartFullScreenEvent event) {
         getSupportActionBar().hide();
         setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
-
+        getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        getWindow().getDecorView().setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
         for (int i = 0; i < contentFrameLayout.getChildCount() - 1; i++) {
             contentFrameLayout.getChildAt(i).setVisibility(View.GONE);
         }
@@ -271,7 +273,8 @@ public class MainActivity extends AppCompatActivity {
     public void onReceiveEndFullScreenRequest(RequestEndFullScreenEvent event) {
         setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
         getSupportActionBar().show();
-
+        getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
         for (int i = 0; i < contentFrameLayout.getChildCount(); i++) {
             contentFrameLayout.getChildAt(i).setVisibility(View.VISIBLE);
         }

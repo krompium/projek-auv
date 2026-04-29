@@ -33,8 +33,8 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
 
     private int frameCount = 0;
 
-    private int videoWidth = 1280;
-    private int videoHeight = 720;
+    private int videoWidth = 1920;
+    private int videoHeight = 1080;
 
     public BaseFpvView(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -109,6 +109,8 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
                 updateTextureViewTransform();
             }
         });
+
+        setBackgroundColor(android.graphics.Color.BLACK);
     }
 
     private void initSDKCallback() {
@@ -125,7 +127,7 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
         if (codecManager == null) {
             codecManager = new DJICodecManager(
                     getContext().getApplicationContext(),
-                    surface, 1280, 720,
+                    surface, 1920, 1080,
                     UsbAccessoryService.VideoStreamSource.Camera);
         }
         post(new Runnable() {
@@ -213,16 +215,26 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
     private void updateTextureViewTransform() {
         if (mVideoSurface == null) return;
 
-        // Fill entire parent — no aspect ratio constraint
-        FrameLayout.LayoutParams videoParams = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT);
+        android.util.DisplayMetrics dm = new android.util.DisplayMetrics();
+        ((android.app.Activity) getContext()).getWindowManager()
+                .getDefaultDisplay().getMetrics(dm);
+        int parentW = dm.widthPixels;
+        int parentH = dm.heightPixels;
+
+        int newH = parentH;
+        int newW = (int)(parentH * 16f / 9f);
+        if (newW > parentW) {
+            newW = parentW;
+            newH = (int)(parentW * 9f / 16f);
+        }
+
+        FrameLayout.LayoutParams videoParams = new FrameLayout.LayoutParams(newW, newH);
+        videoParams.gravity = android.view.Gravity.CENTER;
         mVideoSurface.setLayoutParams(videoParams);
 
         if (overlayView != null) {
-            FrameLayout.LayoutParams overlayParams = new FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.MATCH_PARENT);
+            FrameLayout.LayoutParams overlayParams = new FrameLayout.LayoutParams(newW, newH);
+            overlayParams.gravity = android.view.Gravity.CENTER;
             overlayView.setLayoutParams(overlayParams);
         }
     }

@@ -42,16 +42,16 @@ public class OverlayView extends View {
     public void updateDetections(List<YoloDetector.Detection> newDetections) {
         this.detections = new ArrayList<>(newDetections);
 
-        if (!newDetections.isEmpty()) {
-            post(new Runnable() {
-                @Override
-                public void run() {
-                    android.widget.Toast.makeText(getContext(),
-                            "Overlay received: " + detections.size() + " boxes",
-                            android.widget.Toast.LENGTH_SHORT).show();
-                }
-            });
-        }
+//        if (!newDetections.isEmpty()) {
+//            post(new Runnable() {
+//                @Override
+//                public void run() {
+//                    android.widget.Toast.makeText(getContext(),
+//                            "Overlay received: " + detections.size() + " boxes",
+//                            android.widget.Toast.LENGTH_SHORT).show();
+//                }
+//            });
+//        }
 
         postInvalidate(); // triggers redraw from any thread
     }
