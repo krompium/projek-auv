@@ -27,7 +27,7 @@ public class YoloDetector {
 
     private static final int INPUT_SIZE = 640;
     private static final int MAX_DETECTIONS = 8400;
-    private static final float CONFIDENCE_THRESHOLD = 0.35f;
+    private static final float CONFIDENCE_THRESHOLD = 0.50f;
     private static final float IOU_THRESHOLD = 0.45f;
 
     private Interpreter tflite;
@@ -208,9 +208,5 @@ public class YoloDetector {
             tflite.close();
             tflite = null;
         }
-//        if (gpuDelegate != null) {
-//            gpuDelegate.close();
-//            gpuDelegate = null;
-//        }
     }
 }

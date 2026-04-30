@@ -174,13 +174,13 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
 
         // Only process every 3rd frame to reduce load
         frameCount++;
-        if (frameCount % 3 != 0) return;
+        if (frameCount % 5 != 0) return;
 
         isProcessingFrame = true;
 
         // Get current frame as bitmap from TextureView
         final Bitmap frameBitmap = mVideoSurface.getBitmap(
-                mVideoSurface.getWidth(), mVideoSurface.getHeight());
+                mVideoSurface.getWidth() / 2, mVideoSurface.getHeight() / 2);
 
         processingHandler.post(new Runnable() {
             @Override
@@ -198,10 +198,6 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
                         public void run() {
                             if (overlayView != null) {
                                 overlayView.updateDetections(finalDetections);
-                            } else {
-                                android.widget.Toast.makeText(getContext(),
-                                        "overlayView null at draw time!",
-                                        android.widget.Toast.LENGTH_SHORT).show();
                             }
                         }
                     });

@@ -40,48 +40,19 @@ public class OverlayView extends View {
     }
 
     public void updateDetections(List<YoloDetector.Detection> newDetections) {
-        this.detections = new ArrayList<>(newDetections);
-
-//        if (!newDetections.isEmpty()) {
-//            post(new Runnable() {
-//                @Override
-//                public void run() {
-//                    android.widget.Toast.makeText(getContext(),
-//                            "Overlay received: " + detections.size() + " boxes",
-//                            android.widget.Toast.LENGTH_SHORT).show();
-//                }
-//            });
-//        }
-
-        postInvalidate(); // triggers redraw from any thread
+        this.detections = newDetections;
+        postInvalidate();
     }
 
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
 
-        android.util.Log.d("OVERLAY", "onDraw called, detections="
-                + detections.size() + " w=" + getWidth() + " h=" + getHeight());
-
         float viewWidth  = getWidth();
         float viewHeight = getHeight();
 
         for (YoloDetector.Detection det : detections) {
-            android.util.Log.d("OVERLAY_COORDS",
-                    "box: " + det.boundingBox.toString() +
-                            " viewW=" + viewWidth + " viewH=" + viewHeight);
-        }
-
-        for (YoloDetector.Detection det : detections) {
             RectF box = det.boundingBox;
-
-            if (det == detections.get(0)) {
-                android.widget.Toast.makeText(getContext(),
-                        det.label + " box:" + String.format("%.2f,%.2f,%.2f,%.2f",
-                                box.left, box.top, box.right, box.bottom)
-                                + " view:" + getWidth() + "x" + getHeight(),
-                        android.widget.Toast.LENGTH_SHORT).show();
-            }
 
             // Scale normalized [0,1] coords to view pixel coords
             float left   = box.left   * viewWidth;
