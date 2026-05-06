@@ -36,6 +36,16 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
     private int videoWidth = 1920;
     private int videoHeight = 1080;
 
+    // Callback to notify parent view of detections
+    public interface DetectionCallback {
+        void onDetectionResult(List<YoloDetector.Detection> detections);
+    }
+    private DetectionCallback detectionCallback = null;
+
+    public void setDetectionCallback(DetectionCallback callback) {
+        this.detectionCallback = callback;
+    }
+
     public BaseFpvView(Context context, AttributeSet attrs) {
         super(context, attrs);
         initUI();
@@ -198,6 +208,9 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
                         public void run() {
                             if (overlayView != null) {
                                 overlayView.updateDetections(finalDetections);
+                            }
+                            if (detectionCallback != null && !finalDetections.isEmpty()) {
+                                detectionCallback.onDetectionResult(finalDetections);
                             }
                         }
                     });

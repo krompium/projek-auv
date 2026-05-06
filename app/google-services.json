@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "882801598844",
+    "project_id": "uavwaste",
+    "storage_bucket": "uavwaste.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:882801598844:android:2237e14104706dd5d684f9",
+        "android_client_info": {
+          "package_name": "com.dji.sdk.sample"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD5qBxWUZFKd4fJlHWJS8q_fdf71FI4Tlg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

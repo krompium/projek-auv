@@ -53,7 +53,7 @@ import dji.sdk.gimbal.mode.LookAtMode;
 import dji.sdk.products.Aircraft;
 import dji.sdk.sdkmanager.DJISDKManager;
 
-import static com.google.android.gms.internal.zzahn.runOnUiThread;
+//import static com.google.android.gms.internal.zzahn.runOnUiThread;
 
 public class LookAtMissionView extends LinearLayout implements View.OnClickListener, PresentableView {
 
@@ -321,20 +321,20 @@ public class LookAtMissionView extends LinearLayout implements View.OnClickListe
     }
 
     private void refreshPinPointAndCameraInfo() {
-        runOnUiThread(new Runnable(){
-
-            @Override
-            public void run() {
-                overLayerTopView.onPointsChanged(currentPoints);
-                StringBuffer buffer = new StringBuffer();
-                buffer.append("currentCameraIndex:").append(index).append("\n");
-                buffer.append("currentLensIndex:").append(lensIndex).append("\n");
-                for (Point pinPoint : currentPoints) {
-                    buffer.append(pinPoint.toString()).append("\n");
-                }
-                laserInfoTv.setText(buffer.toString());
-            }
-        });
+//        runOnUiThread(new Runnable(){
+//
+//            @Override
+//            public void run() {
+//                overLayerTopView.onPointsChanged(currentPoints);
+//                StringBuffer buffer = new StringBuffer();
+//                buffer.append("currentCameraIndex:").append(index).append("\n");
+//                buffer.append("currentLensIndex:").append(lensIndex).append("\n");
+//                for (Point pinPoint : currentPoints) {
+//                    buffer.append(pinPoint.toString()).append("\n");
+//                }
+//                laserInfoTv.setText(buffer.toString());
+//            }
+//        });
     }
 
     private void lookAt() {

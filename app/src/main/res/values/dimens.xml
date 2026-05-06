@@ -15,4 +15,8 @@
     <dimen name="item_title_size">18sp</dimen>
     <dimen name="test_log_textsize">17sp</dimen>
     <dimen name="button_widget">200dp</dimen>
+
+    <dimen name="offline_map_header_bar_title_size">18sp</dimen>
+    <dimen name="offline_map_manager_title_size">16sp</dimen>
+
 </resources>

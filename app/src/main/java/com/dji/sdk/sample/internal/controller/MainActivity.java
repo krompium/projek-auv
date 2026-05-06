@@ -275,16 +275,23 @@ public class MainActivity extends AppCompatActivity {
         getSupportActionBar().show();
         getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
-        // Restore visibility but only show top view — background views stay invisible
-        // This prevents the connect screen from showing through the demo list
+        contentFrameLayout.setBackgroundColor(android.graphics.Color.TRANSPARENT);
+
+        // Remove all views except the bottom one (main content)
+        // then restore only the top view properly
         int childCount = contentFrameLayout.getChildCount();
         for (int i = 0; i < childCount; i++) {
             View child = contentFrameLayout.getChildAt(i);
-            child.setVisibility(View.VISIBLE);
-            // Background views fade to alpha 0, only top view is fully visible
-            child.setAlpha(i == childCount - 1 ? 1f : 0f);
+            if (i < childCount - 1) {
+                // Hide background views completely
+                child.setVisibility(View.GONE);
+                child.setAlpha(0f);
+            } else {
+                // Show only the top view
+                child.setVisibility(View.VISIBLE);
+                child.setAlpha(1f);
+            }
         }
-        contentFrameLayout.setBackgroundColor(android.graphics.Color.TRANSPARENT);
     }
 
     @Subscribe

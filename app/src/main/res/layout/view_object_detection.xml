@@ -66,7 +66,7 @@
 
     </LinearLayout>
 
-    <!-- LEFT SIDE: Takeoff / Land / Gimbal — semi transparent -->
+    <!-- LEFT SIDE: Gimbal buttons -->
     <LinearLayout
         android:layout_width="110dp"
         android:layout_height="wrap_content"
@@ -74,28 +74,6 @@
         android:layout_marginLeft="12dp"
         android:orientation="vertical"
         android:alpha="0.75">
-
-        <Button
-            android:id="@+id/btn_takeoff"
-            android:layout_width="match_parent"
-            android:layout_height="46dp"
-            android:layout_marginBottom="8dp"
-            android:background="@drawable/round_btn"
-            android:text="Take Off"
-            android:textAllCaps="false"
-            android:textColor="@color/common_text_color"
-            android:textSize="12sp"/>
-
-        <Button
-            android:id="@+id/btn_land"
-            android:layout_width="match_parent"
-            android:layout_height="46dp"
-            android:layout_marginBottom="16dp"
-            android:background="@drawable/round_btn"
-            android:text="Land"
-            android:textAllCaps="false"
-            android:textColor="@color/common_text_color"
-            android:textSize="12sp"/>
 
         <Button
             android:id="@+id/btn_gimbal_up"
@@ -120,7 +98,7 @@
 
     </LinearLayout>
 
-    <!-- RIGHT SIDE: Photo / Record — semi transparent -->
+    <!-- RIGHT SIDE: Photo / Record -->
     <LinearLayout
         android:layout_width="110dp"
         android:layout_height="wrap_content"
@@ -151,5 +129,33 @@
             android:textSize="12sp"/>
 
     </LinearLayout>
+
+    <!-- BOTTOM RIGHT: Mini Map (tap to expand) -->
+    <FrameLayout
+        android:id="@+id/map_container"
+        android:layout_width="160dp"
+        android:layout_height="120dp"
+        android:layout_gravity="bottom|start"
+        android:layout_margin="12dp"
+        android:alpha="0.85">
+
+        <org.osmdroid.views.MapView
+            android:id="@+id/map_view"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"/>
+
+        <!-- Upload status indicator -->
+        <TextView
+            android:id="@+id/tv_upload_status"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|start"
+            android:background="#AA000000"
+            android:text="Firebase: --"
+            android:textColor="#FFFFFF"
+            android:textSize="9sp"
+            android:padding="2dp"/>
+
+    </FrameLayout>
 
 </FrameLayout>
