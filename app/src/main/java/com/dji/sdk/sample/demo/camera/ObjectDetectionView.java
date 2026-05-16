@@ -167,14 +167,14 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView 
                 @Override
                 public void onDetectionResult(List<YoloDetector.Detection> detections) {
                     if (!detections.isEmpty()) {
-                        tryUploadToFirebase(detections.size());
+                        tryUploadToFirebase(detections);
                     }
                 }
             });
         }
     }
 
-    private void tryUploadToFirebase(int detectionCount) {
+    private void tryUploadToFirebase(List<YoloDetector.Detection> detections) {
         // Validate location
         if (Double.isNaN(currentLat) || Double.isNaN(currentLng)) return;
         if (currentLat == 0 && currentLng == 0) return;
@@ -193,20 +193,23 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView 
             if (distance < MIN_DISTANCE_METERS) return;
         }
 
-        // All checks passed — upload
+        // All checks passed — upload one document per detected item
         lastUploadTime = now;
         lastUploadLat  = currentLat;
         lastUploadLng  = currentLng;
 
-        uploadToFirebase(detectionCount, currentLat, currentLng, currentAlt);
+        for (YoloDetector.Detection detection : detections) {
+            uploadToFirebase(detection, currentLat, currentLng, currentAlt);
+        }
     }
 
-    private void uploadToFirebase(int count, double lat, double lng, double alt) {
+    private void uploadToFirebase(YoloDetector.Detection detection,
+                                  double lat, double lng, double alt) {
         if (db == null) return;
 
         Map<String, Object> data = new HashMap<>();
-        data.put("jumlahDeteksi", count);
-        data.put("labels", "rubbish");
+        data.put("label", detection.label);
+        data.put("confidence", Math.round(detection.confidence * 100));
         data.put("latitude", lat);
         data.put("longitude", lng);
         data.put("altitude", alt);
@@ -218,7 +221,8 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView 
                 .add(data)
                 .addOnSuccessListener(ref -> {
                     mainHandler.post(() ->
-                            tvUploadStatus.setText("Firebase: ✓ Uploaded"));
+                            tvUploadStatus.setText("Firebase: ✓ " +
+                                    detection.label + " uploaded"));
                 })
                 .addOnFailureListener(e -> {
                     mainHandler.post(() ->
@@ -528,6 +532,8 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView 
             ((android.app.Activity) getContext()).getWindow().setFlags(
                     android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN,
                     android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
+            ((android.app.Activity) getContext()).getWindow().addFlags(
+                    android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         }
         mapView.onResume();
         startTelemetry();
@@ -544,6 +550,8 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView 
         if (getContext() instanceof android.app.Activity) {
             ((android.app.Activity) getContext()).getWindow().clearFlags(
                     android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
+            ((android.app.Activity) getContext()).getWindow().clearFlags(
+                    android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         }
         super.onDetachedFromWindow();
     }
