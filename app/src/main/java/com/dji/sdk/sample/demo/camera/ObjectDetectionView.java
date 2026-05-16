@@ -75,13 +75,14 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView 
     private double lastUploadLat = 0;
     private double lastUploadLng = 0;
     private long lastUploadTime = 0;
-    private static final long UPLOAD_COOLDOWN_MS = 10000; // 10 seconds
-    private static final double MIN_DISTANCE_METERS = 3.0; // 3 meters
+    private static final long UPLOAD_COOLDOWN_MS = 5000;  // 5 seconds
+    private static final double MIN_DISTANCE_METERS = 2.0; // 2 meters
 
     // Current drone location
     private double currentLat = 0;
     private double currentLng = 0;
     private double currentAlt = 0;
+    private int currentSatelliteCount = 0;
 
     public ObjectDetectionView(Context context) {
         super(context);
@@ -335,6 +336,7 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView 
                     final float speedY = state.getVelocityY();
                     final float speed  = (float) Math.sqrt(speedX * speedX + speedY * speedY);
                     final int   sats   = state.getSatelliteCount();
+                    currentSatelliteCount = sats;
 
                     // Only update if valid GPS fix
                     if (!Double.isNaN(lat) && !Double.isNaN(lng) && lat != 0 && lng != 0) {
@@ -406,7 +408,6 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView 
 
     // ---- AUTO PREFLIGHT CHECK ----
     private void runPreflightChecks() {
-        // Small delay to let SDK initialize first
         mainHandler.postDelayed(() -> {
             StringBuilder warnings = new StringBuilder();
             java.util.List<Runnable> actions = new java.util.ArrayList<>();
@@ -431,10 +432,8 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView 
                     .getSystemService(Context.LOCATION_SERVICE);
             if (lm != null && !lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                 warnings.append("❌ Phone GPS is OFF\n\n");
-                actions.add(() -> {
-                    getContext().startActivity(
-                            new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS));
-                });
+                actions.add(() -> getContext().startActivity(
+                        new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)));
             }
 
             // Check 3 — Drone connected
@@ -447,83 +446,46 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView 
 
             Aircraft aircraft = (Aircraft) product;
             FlightController fc = aircraft.getFlightController();
-
             if (fc == null) {
                 warnings.append("❌ Flight controller unavailable\n\n");
                 showPreflightDialog(warnings.toString(), null);
                 return;
             }
 
-            // Check 4 — Flight Controller state (GPS sats, IMU, etc.)
-            fc.setStateCallback(new FlightControllerState.Callback() {
-                private boolean checked = false;
+            // Check 4 — Read state ONCE from current telemetry data
+            // We use currentLat/Lng already being updated by startTelemetry()
+            // DO NOT call fc.setStateCallback here — it would overwrite telemetry!
 
-                @Override
-                public void onUpdate(@NonNull FlightControllerState state) {
-                    if (checked) return;
-                    checked = true;
+//            int sats = state_satelliteCount; // We'll use a stored field instead
 
-                    // Check satellite count
-                    int sats = state.getSatelliteCount();
-                    if (sats < 6) {
-                        warnings.append("⚠️ Weak GPS signal (")
-                                .append(sats)
-                                .append(" satellites, need 6+)\n")
-                                .append("   → Wait for more satellites\n\n");
-                    }
+            // Check GPS from stored telemetry value
+            if (currentSatelliteCount < 6) {
+                warnings.append("⚠️ Weak GPS signal (")
+                        .append(currentSatelliteCount)
+                        .append(" satellites, need 6+)\n")
+                        .append("   → Wait for more satellites\n\n");
+            }
 
-                    // Check flight mode — not safe to fly if in certain modes
-                    FlightMode mode = state.getFlightMode();
-                    if (mode == FlightMode.MANUAL || mode == FlightMode.ATTI) {
-                        warnings.append("⚠️ Drone is in manual/attitude mode\n")
-                                .append("   → Switch to GPS mode for safe flight\n\n");
-                    }
-
-                    // Check if drone is flying already
-                    if (state.isFlying()) {
-                        warnings.append("ℹ️ Drone is already airborne\n\n");
-                    }
-
-                    // Check battery
-                    Battery battery = aircraft.getBattery();
-                    if (battery != null) {
-                        battery.setStateCallback(new BatteryState.Callback() {
-                            private boolean batteryChecked = false;
-
-                            @Override
-                            public void onUpdate(@NonNull BatteryState batteryState) {
-                                if (batteryChecked) return;
-                                batteryChecked = true;
-
-                                int pct = batteryState.getChargeRemainingInPercent();
-                                if (pct < 25) {
-                                    warnings.append("❌ Battery critically low (")
-                                            .append(pct)
-                                            .append("%)\n")
-                                            .append("   → Charge before flying\n\n");
-                                } else if (pct < 50) {
-                                    warnings.append("⚠️ Battery low (")
-                                            .append(pct)
-                                            .append("%)\n")
-                                            .append("   → Consider charging\n\n");
-                                }
-
-                                // Show final result
-                                showPreflightDialog(warnings.toString(),
-                                        actions.isEmpty() ? null : actions.get(0));
-
-                                // Reset battery callback after check
-                                battery.setStateCallback(null);
-                            }
-                        });
-                    } else {
-                        showPreflightDialog(warnings.toString(),
-                                actions.isEmpty() ? null : actions.get(0));
-                    }
+            // Check battery from current percentage shown in UI
+            String batText = tvBattery.getText().toString();
+            try {
+                int pct = Integer.parseInt(
+                        batText.replace("BAT: ", "").replace("%", "").trim());
+                if (pct < 25) {
+                    warnings.append("❌ Battery critically low (")
+                            .append(pct).append("%)\n")
+                            .append("   → Charge before flying\n\n");
+                } else if (pct < 50) {
+                    warnings.append("⚠️ Battery low (")
+                            .append(pct).append("%)\n")
+                            .append("   → Consider charging\n\n");
                 }
-            });
+            } catch (Exception ignored) {}
 
-        }, 2000); // 2 second delay after view opens
+            showPreflightDialog(warnings.toString(),
+                    actions.isEmpty() ? null : actions.get(0));
+
+        }, 2000);
     }
 
     private void showPreflightDialog(String warnings, Runnable fixAction) {
