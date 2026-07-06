@@ -32,7 +32,10 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
     private OverlayView overlayView;
 
     private int frameCount = 0;
-
+    private int droppedFrameCount = 0;
+    private long lastCaptureStartTime = 0;
+    private static final long MIN_CAPTURE_INTERVAL_MS = 400; // ms between capture attempts
+    private int capturedFrameCount = 0;
     private int videoWidth = 1920;
     private int videoHeight = 1080;
 
@@ -58,7 +61,7 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
         processingHandler = new Handler(processingThread.getLooper());
 
         // Load YOLO model in background thread
-        new Thread(new Runnable() {
+        processingHandler.post(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -83,7 +86,7 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
                     });
                 }
             }
-        }).start();
+        });
 
         // Inflate layout
         LayoutInflater layoutInflater = (LayoutInflater) getContext()
@@ -176,43 +179,56 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
 
     @Override
     public void onSurfaceTextureUpdated(SurfaceTexture surface) {
-        // This fires every frame — grab bitmap directly from TextureView
-        // Skip if still processing previous frame or model not loaded
-        if (isProcessingFrame) return;
         if (yoloDetector == null) return;
         if (mVideoSurface == null) return;
 
-        // Only process every 3rd frame to reduce load
-        frameCount++;
-        if (frameCount % 5 != 0) return;
+        long now = System.currentTimeMillis();
+        if (now - lastCaptureStartTime < MIN_CAPTURE_INTERVAL_MS) return;
+        lastCaptureStartTime = now;
+
+        // Measure dropped frames
+        if (isProcessingFrame) {
+            droppedFrameCount++;
+            return;
+        }
 
         isProcessingFrame = true;
+        capturedFrameCount++;
 
-        // Get current frame as bitmap from TextureView
-        final Bitmap frameBitmap = mVideoSurface.getBitmap(
-                mVideoSurface.getWidth() / 2, mVideoSurface.getHeight() / 2);
+        // Measure getBitmap time on UI thread
+        long captureStart = System.currentTimeMillis();
+        final Bitmap frameBitmap = mVideoSurface.getBitmap(640, 640);
+        final long captureMs = System.currentTimeMillis() - captureStart;
 
         processingHandler.post(new Runnable() {
             @Override
             public void run() {
                 try {
-                    if (frameBitmap == null) return;
-                    Bitmap scaledBmp = Bitmap.createScaledBitmap(frameBitmap, 640, 640, true);
-                    frameBitmap.recycle();
-                    List<YoloDetector.Detection> detections = yoloDetector.detect(scaledBmp);
-                    scaledBmp.recycle();
+                    if (frameBitmap == null) {
+                        new Handler(android.os.Looper.getMainLooper()).post(() ->
+                                android.widget.Toast.makeText(getContext(),
+                                        "Frame capture null", android.widget.Toast.LENGTH_SHORT).show());
+                        return;
+                    }
 
-                    final List<YoloDetector.Detection> finalDetections = detections;
-                    new Handler(android.os.Looper.getMainLooper()).post(new Runnable() {
-                        @Override
-                        public void run() {
-                            if (overlayView != null) {
-                                overlayView.updateDetections(finalDetections);
-                            }
-                            if (detectionCallback != null && !finalDetections.isEmpty()) {
-                                detectionCallback.onDetectionResult(finalDetections);
-                            }
-                        }
+                    // Measure inference time
+                    long inferStart = System.currentTimeMillis();
+                    List<YoloDetector.Detection> detections = yoloDetector.detect(frameBitmap);
+                    final long inferMs = System.currentTimeMillis() - inferStart;
+                    frameBitmap.recycle();
+
+                    // Show diagnostics every 30 captured frames
+                    if (capturedFrameCount % 30 == 0) {
+                        new Handler(android.os.Looper.getMainLooper()).post(() ->
+                                android.widget.Toast.makeText(getContext(),
+                                        "Capture: " + captureMs + "ms | Infer: " + inferMs + "ms | Dropped: " + droppedFrameCount,
+                                        android.widget.Toast.LENGTH_LONG).show());
+                    }
+
+                    new Handler(android.os.Looper.getMainLooper()).post(() -> {
+                        if (overlayView != null) overlayView.updateDetections(detections);
+                        if (detectionCallback != null && !detections.isEmpty())
+                            detectionCallback.onDetectionResult(detections);
                     });
                 } finally {
                     isProcessingFrame = false;

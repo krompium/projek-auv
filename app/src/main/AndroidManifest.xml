@@ -51,6 +51,10 @@
         <!-- Required for receiving accessory attachment events.
             This is necessary for product when connecting over USB. -->
 
+        <meta-data
+            android:name="com.google.android.geo.API_KEY"
+            android:value="AIzaSyDaN7fGUo5I4rDQNhNS5uJA97CJp5gh_Qw" />
+
         <activity
             android:name="com.dji.sdk.sample.internal.controller.MainActivity"
             android:label="@string/sample_app_name"

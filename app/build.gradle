@@ -73,6 +73,7 @@ android {
         doNotStrip "*/*/libAMapSDK_MAP_v6_9_2.so"
         doNotStrip "*/*/libDJIMOP.so"
         doNotStrip "*/*/libDJISDKLOGJNI.so"
+        doNotStrip "*/*/libgpudelegate.so"
         exclude 'META-INF/rxjava.properties'
         exclude 'assets/location_map_gps_locked.png'
         exclude 'assets/location_map_gps_3d.png'
@@ -132,12 +133,13 @@ dependencies {
     implementation 'io.reactivex.rxjava2:rxandroid:2.1.0'
 
     implementation 'org.tensorflow:tensorflow-lite:2.14.0'
-    implementation 'org.tensorflow:tensorflow-lite-support:0.4.4'
-//    implementation 'org.tensorflow:tensorflow-lite-gpu:2.14.0'
+    implementation 'org.tensorflow:tensorflow-lite-gpu:2.14.0'
+    implementation 'org.tensorflow:tensorflow-lite-gpu-api:2.14.0'
 
     implementation platform('com.google.firebase:firebase-bom:34.12.0')
     implementation 'com.google.firebase:firebase-firestore'
     implementation 'org.osmdroid:osmdroid-android:6.1.18'
+    implementation 'com.google.android.gms:play-services-maps:18.2.0'
 
     implementation 'com.squareup.okio:okio:1.15.0'
 }

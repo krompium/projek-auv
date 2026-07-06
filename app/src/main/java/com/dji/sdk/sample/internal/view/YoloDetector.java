@@ -6,6 +6,8 @@ import android.graphics.RectF;
 import android.util.Log;
 
 import org.tensorflow.lite.Interpreter;
+import org.tensorflow.lite.gpu.CompatibilityList;
+import org.tensorflow.lite.gpu.GpuDelegate;
 
 import java.io.BufferedReader;
 import java.io.FileInputStream;
@@ -21,10 +23,12 @@ import java.util.List;
 public class YoloDetector {
 
     private static final String TAG = "YoloDetector";
-    private static final String MODEL_FILE = "best_full_integer_quant.tflite";
+    private static final String MODEL_FILE = "best_float16.tflite";
     private static final String LABELS_FILE = "labels.txt";
 
     private static final int INPUT_SIZE = 640;
+    private int nextTrackId = 1;
+    private List<TrackedObject> trackedObjects = new ArrayList<>();
     private static final int MAX_DETECTIONS = 8400;
     private static final float CONFIDENCE_THRESHOLD = 0.35f;
     private static final float IOU_THRESHOLD = 0.45f;
@@ -33,22 +37,35 @@ public class YoloDetector {
     private List<String> labels = new ArrayList<>();
     private ByteBuffer inputBuffer;
 
-    // int8 quantization params — read from model
     private float inputScale;
     private int inputZeroPoint;
     private float outputScale;
     private int outputZeroPoint;
     private boolean isInt8 = false;
+    private GpuDelegate gpuDelegate = null;
 
     public static class Detection {
         public final RectF boundingBox;
         public final String label;
         public final float confidence;
+        public int trackId;
 
         public Detection(RectF boundingBox, String label, float confidence) {
             this.boundingBox = boundingBox;
             this.label = label;
             this.confidence = confidence;
+        }
+    }
+
+    private static class TrackedObject {
+        int id;
+        RectF rect;
+        int lostFrames;
+
+        public TrackedObject(int id, RectF rect) {
+            this.id = id;
+            this.rect = rect;
+            this.lostFrames = 0;
         }
     }
 
@@ -58,7 +75,21 @@ public class YoloDetector {
             MappedByteBuffer modelBuffer = loadModelFile(context);
 
             Interpreter.Options options = new Interpreter.Options();
-            options.setNumThreads(4);
+
+            CompatibilityList compatList = new CompatibilityList();
+            if (compatList.isDelegateSupportedOnThisDevice()) {
+                GpuDelegate.Options delegateOptions = compatList.getBestOptionsForThisDevice();
+                gpuDelegate = new GpuDelegate(delegateOptions);
+                options.addDelegate(gpuDelegate);
+                new android.os.Handler(android.os.Looper.getMainLooper()).post(() ->
+                        android.widget.Toast.makeText(context,
+                                "GPU Delegate: Active", android.widget.Toast.LENGTH_LONG).show());
+            } else {
+                options.setNumThreads(4);
+                new android.os.Handler(android.os.Looper.getMainLooper()).post(() ->
+                        android.widget.Toast.makeText(context,
+                                "GPU not supported — CPU fallback (4 threads)", android.widget.Toast.LENGTH_LONG).show());
+            }
 
             tflite = new Interpreter(modelBuffer, options);
 
@@ -133,13 +164,10 @@ public class YoloDetector {
             int b =  pixel        & 0xFF;
 
             if (isInt8) {
-                // Correct formula: quantized = round(pixel/255 / scale) + zeroPoint
-                // Since scale ≈ 1/255 and zeroPoint = -128, this simplifies to: pixel - 128
                 inputBuffer.put((byte) (r + inputZeroPoint));
                 inputBuffer.put((byte) (g + inputZeroPoint));
                 inputBuffer.put((byte) (b + inputZeroPoint));
             } else {
-                // float32 and float16 — normalize to [0,1]
                 inputBuffer.putFloat(r / 255.0f);
                 inputBuffer.putFloat(g / 255.0f);
                 inputBuffer.putFloat(b / 255.0f);
@@ -154,16 +182,13 @@ public class YoloDetector {
         try {
             bitmapToInputBuffer(bitmap);
 
-            // Output shape: [1, 4+numClasses, 8400]
             int numClasses = labels.size();
             float[][][] output = new float[1][4 + numClasses][MAX_DETECTIONS];
 
             if (isInt8) {
-                // int8 output — dequantize after inference
                 byte[][][] rawOutput = new byte[1][4 + numClasses][MAX_DETECTIONS];
                 tflite.run(inputBuffer, rawOutput);
 
-                // Dequantize: float = (int8_val - zeroPoint) * scale
                 for (int row = 0; row < 4 + numClasses; row++) {
                     for (int col = 0; col < MAX_DETECTIONS; col++) {
                         output[0][row][col] =
@@ -237,6 +262,8 @@ public class YoloDetector {
                 }
             }
         }
+        assignTrackIds(result);
+
         return result;
     }
 
@@ -259,6 +286,63 @@ public class YoloDetector {
         if (tflite != null) {
             tflite.close();
             tflite = null;
+        }
+        if (gpuDelegate != null) {
+            gpuDelegate.close();
+            gpuDelegate = null;
+        }
+    }
+
+    private void assignTrackIds(List<Detection> currentDetections) {
+        float MAX_DISTANCE = 150.0f;
+        int MAX_LOST_FRAMES = 5;
+
+        if (trackedObjects.isEmpty()) {
+            for (Detection d : currentDetections) {
+                d.trackId = nextTrackId++;
+                trackedObjects.add(new TrackedObject(d.trackId, d.boundingBox));
+            }
+            return;
+        }
+
+        boolean[] matchedTracks = new boolean[trackedObjects.size()];
+
+        for (Detection d : currentDetections) {
+            float centerX = d.boundingBox.centerX();
+            float centerY = d.boundingBox.centerY();
+
+            int bestTrackIdx = -1;
+            float minDistance = MAX_DISTANCE;
+
+            for (int j = 0; j < trackedObjects.size(); j++) {
+                if (matchedTracks[j]) continue;
+                TrackedObject t = trackedObjects.get(j);
+                float dist = (float) Math.hypot(centerX - t.rect.centerX(), centerY - t.rect.centerY());
+
+                if (dist < minDistance) {
+                    minDistance = dist;
+                    bestTrackIdx = j;
+                }
+            }
+
+            if (bestTrackIdx != -1) {
+                matchedTracks[bestTrackIdx] = true;
+                d.trackId = trackedObjects.get(bestTrackIdx).id;
+                trackedObjects.get(bestTrackIdx).rect = d.boundingBox;
+                trackedObjects.get(bestTrackIdx).lostFrames = 0;
+            } else {
+                d.trackId = nextTrackId++;
+                trackedObjects.add(new TrackedObject(d.trackId, d.boundingBox));
+            }
+        }
+
+        for (int j = trackedObjects.size() - 1; j >= 0; j--) {
+            if (!matchedTracks[j]) {
+                trackedObjects.get(j).lostFrames++;
+                if (trackedObjects.get(j).lostFrames > MAX_LOST_FRAMES) {
+                    trackedObjects.remove(j);
+                }
+            }
         }
     }
 }

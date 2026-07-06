@@ -120,3 +120,5 @@
 -keep class dji.sdk.utmiss.** { *; }
 -keep class utmisslib.** { *; }
 #<------------ utmiss config end------------>
+
+-keep class org.tensorflow.lite.gpu.** { *; }

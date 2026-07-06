@@ -213,7 +213,7 @@
         android:layout_alignParentBottom="true"
         android:layout_alignParentLeft="true">
 
-        <org.osmdroid.views.MapView
+        <com.google.android.gms.maps.MapView
             android:id="@+id/map_view"
             android:layout_width="match_parent"
             android:layout_height="match_parent"/>
