@@ -97,6 +97,10 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
                                     android.widget.Toast.LENGTH_SHORT).show();
                         }
                     });
+                    // Offline parity harness (U6): one-shot replay of bundled
+                    // test images when the run_harness marker file exists.
+                    DetectionHarness.runIfRequested(
+                            getContext().getApplicationContext(), yoloDetector, metricsLogger);
                 } catch (Throwable e) {
                     final String err = e.getClass().getSimpleName() + ": " + e.getMessage();
                     new Handler(android.os.Looper.getMainLooper()).post(new Runnable() {
