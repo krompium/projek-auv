@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fix: UAV waste detection — debug, validation &amp; improvement</title>
+<style>
+  :root{
+    --bg:#f7f7f5; --surface:#ffffff; --surface-2:#f0efea;
+    --text:#1c1b19; --muted:#6b6a66; --faint:#8f8e8a;
+    --border:#e2e0da; --border-strong:#cfcdc6;
+    --accent:#2f6f4e; --accent-soft:#e3f0e8; --accent-text:#1e5136;
+    --warn:#9a6a12; --warn-soft:#f6ecd7; --warn-text:#7a5310;
+    --danger:#a3382f; --danger-soft:#f6e0dd; --danger-text:#83291f;
+    --info:#2c5a8f; --info-soft:#dde8f4; --info-text:#22496f;
+    --radius:8px; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#17171a; --surface:#1f1f23; --surface-2:#26262b;
+      --text:#e9e8e4; --muted:#a8a7a2; --faint:#7f7e7a;
+      --border:#33333a; --border-strong:#45454d;
+      --accent:#6bbf90; --accent-soft:#1e2f26; --accent-text:#9fd9b8;
+      --warn:#d6a94e; --warn-soft:#312a1a; --warn-text:#e6c987;
+      --danger:#e0857b; --danger-soft:#33211f; --danger-text:#f0a89f;
+      --info:#7db0e0; --info-soft:#1c2733; --info-text:#a6cbec;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.65;font-size:16px}
+  .page{max-width:940px;margin-inline:auto;padding:40px 24px 80px}
+  h1{font-size:26px;font-weight:600;line-height:1.25;margin:0 0 4px}
+  h2{font-size:19px;font-weight:600;margin:0 0 14px;padding-top:8px}
+  h3{font-size:16px;font-weight:600;margin:0}
+  p{max-width:74ch}
+  a{color:var(--accent-text);text-decoration:none;border-bottom:1px solid var(--border-strong)}
+  a:hover{border-color:var(--accent)}
+  code{font-family:var(--mono);font-size:.86em;background:var(--surface-2);padding:1px 5px;border-radius:4px}
+  hr{border:none;border-top:1px solid var(--border);margin:36px 0}
+  section{margin-bottom:8px}
+  .eyebrow{font-size:12px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);font-weight:600;margin:0 0 6px}
+  .status{display:inline-block;background:var(--accent-soft);color:var(--accent-text);font-weight:600;
+    font-size:12px;letter-spacing:.05em;text-transform:uppercase;padding:3px 10px;border-radius:20px}
+  .metabar{display:flex;flex-wrap:wrap;gap:8px 20px;color:var(--muted);font-size:14px;margin-top:12px;align-items:center}
+  .metabar b{color:var(--text);font-weight:600}
+  .stats{display:flex;flex-wrap:wrap;gap:12px;margin:24px 0 8px}
+  .stat{flex:1 1 120px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+  .stat .n{font-size:24px;font-weight:600;line-height:1}
+  .stat .l{font-size:12.5px;color:var(--muted);margin-top:5px}
+  table{width:100%;border-collapse:collapse;margin:8px 0 4px;font-size:15px}
+  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--border);vertical-align:top}
+  th{font-size:12.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600}
+  td.id,th.id{width:52px;white-space:nowrap}
+  .chip{font-family:var(--mono);font-size:12.5px;font-weight:600;color:var(--accent-text);
+    background:var(--accent-soft);padding:2px 7px;border-radius:5px}
+  .grp{font-size:13px;font-weight:600;color:var(--text);margin:20px 0 2px;letter-spacing:.01em}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px 20px;margin:14px 0}
+  .ktd .dec{font-weight:600;margin:0 0 4px;display:flex;gap:9px;align-items:baseline}
+  .ktd .dec .chip{background:var(--info-soft);color:var(--info-text)}
+  .ktd p{margin:0;color:var(--text)}
+  article.unit{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:0;margin:14px 0;overflow:hidden}
+  .uhead{display:flex;gap:11px;align-items:baseline;padding:16px 20px 10px}
+  .uhead .chip{font-size:13px}
+  .uhead h3{font-size:16px}
+  dl.strip{margin:0;padding:0 20px 10px;display:grid;grid-template-columns:auto 1fr;gap:5px 16px;font-size:14.5px}
+  dl.strip dt{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em;font-weight:600;padding-top:2px}
+  dl.strip dd{margin:0}
+  dl.strip dd code{font-size:.82em}
+  details{border-top:1px solid var(--border);padding:10px 20px}
+  details summary{cursor:pointer;font-size:13px;font-weight:600;color:var(--accent-text);list-style:none}
+  details summary::-webkit-details-marker{display:none}
+  details summary::before{content:"▸ ";color:var(--muted)}
+  details[open] summary::before{content:"▾ "}
+  details ul{margin:10px 0 4px;padding-left:20px}
+  details li{margin:5px 0;font-size:14.5px}
+  .callout{border-left:3px solid var(--warn);background:var(--warn-soft);border-radius:0 8px 8px 0;
+    padding:10px 14px;margin:12px 0;font-size:14.5px}
+  .callout.exec{border-color:var(--info);background:var(--info-soft)}
+  .callout b{color:var(--text)}
+  .risk{border-left:4px solid var(--border-strong);border-radius:0 10px 10px 0;background:var(--surface);
+    border-top:1px solid var(--border);border-right:1px solid var(--border);border-bottom:1px solid var(--border);
+    padding:14px 18px;margin:12px 0}
+  .risk .eb{font-size:11.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;margin-bottom:4px}
+  .risk.open{border-left-color:var(--danger)} .risk.open .eb{color:var(--danger-text)}
+  .risk.mit{border-left-color:var(--accent)} .risk.mit .eb{color:var(--accent-text)}
+  .risk.watch{border-left-color:var(--warn)} .risk.watch .eb{color:var(--warn-text)}
+  .scope{display:flex;flex-direction:column;gap:10px;margin:10px 0}
+  .scope div{border-left:4px solid var(--border-strong);padding:8px 14px;border-radius:0 8px 8px 0;background:var(--surface);font-size:14.5px}
+  .scope .in{border-left-color:var(--accent)} .scope .out{border-left-color:var(--faint)} .scope .def{border-left-color:var(--warn)}
+  .subnav{display:flex;flex-wrap:wrap;gap:7px;margin:6px 0 16px}
+  .subnav a{font-family:var(--mono);font-size:12.5px;background:var(--surface-2);border:1px solid var(--border);
+    border-radius:6px;padding:3px 8px;color:var(--muted)}
+  .subnav a:hover{color:var(--accent-text);border-color:var(--accent)}
+  figure{margin:16px 0;padding:16px;background:var(--surface);border:1px solid var(--border);border-radius:12px}
+  figure figcaption{font-size:13px;color:var(--muted);margin-top:10px}
+  svg text{font-family:var(--sans)}
+  footer.composition-signal{margin-top:48px;padding-top:16px;border-top:1px solid var(--border);
+    font-size:13px;color:var(--faint)}
+  .lead{font-size:17px;color:var(--text)}
+  ul.plain{padding-left:20px} ul.plain li{margin:5px 0}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <p class="eyebrow">Implementation plan</p>
+  <h1>fix: UAV waste detection — debug, validation &amp; improvement</h1>
+  <div class="metabar">
+    <span><span class="status">completed</span></span>
+    <span>Type <b>fix</b></span>
+    <span>Created <time datetime="2026-07-07">2026-07-07</time></span>
+    <span>Depth <b>Deep</b></span>
+    <span>Target repo <b><a href="https://github.com/krompium/projek-auv">krompium/projek-auv</a></b></span>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="n">10</div><div class="l">Implementation units</div></div>
+    <div class="stat"><div class="n">5</div><div class="l">Milestones</div></div>
+    <div class="stat"><div class="n">10</div><div class="l">Requirements</div></div>
+    <div class="stat"><div class="n">3</div><div class="l">Confirmed code bugs</div></div>
+  </div>
+
+  <hr>
+
+  <section>
+    <h2>Summary</h2>
+    <p class="lead">Debug the on-drone Android detection pipeline end to end, prove its algorithms match real-world testing, then raise detection quality and runtime smoothness — correctness first.</p>
+    <p>Three concrete bugs are already confirmed by reading the current code, the largest being a tracking bug that compares normalized <code>[0,1]</code> box centers against a 150-pixel threshold, so every detection always matches the nearest track. This corrupts track IDs and the Firebase dedup that depends on them — the likely root of the "tracking not smooth" thread the project stalled on. The plan fixes correctness bugs, builds an offline harness to validate the TFLite pipeline against Colab/Roboflow ground truth, tunes detection thresholds from data, then adds inter-frame prediction and thermal-aware gating for smoothness. The web dashboard is out of code-inspection scope (its code is not in this repo) and is carried as a validation checklist plus deferred follow-up.</p>
+  </section>
+
+  <hr>
+
+  <section>
+    <h2>Problem Frame</h2>
+    <p>The system (<code>DJI feed → GPU YOLOv8n float16 → Firestore</code>) runs stably at Dropped=0 and 30 FPS FPV, but the reported field symptoms — box lag, false positives, missed detections, Firebase over- and under-counting, unstable track IDs, thermal slowdown — point to correctness and validation gaps rather than raw stability. Two forces make debugging hard and shape this plan: the phone's USB is occupied by the RC (so Logcat is impractical — diagnostics must be file-based and offline), and the test device (Helio G99 / Mali-G57 MC2) is at its realistic inference ceiling (~200 ms/frame), so smoothness must come from prediction, not faster inference. The knowledge base (<a href="https://github.com/krompium/projek-auv/blob/main/UAV_Waste_Detection_KnowledgeBase.md"><code>UAV_Waste_Detection_KnowledgeBase.md</code></a>) is the origin document for prior decisions and the open tracking thread.</p>
+  </section>
+
+  <hr>
+
+  <section>
+    <h2>Requirements</h2>
+
+    <div class="grp">Correctness</div>
+    <table>
+      <thead><tr><th class="id">ID</th><th>Requirement</th></tr></thead>
+      <tbody>
+        <tr><td class="id" id="r1"><span class="chip">R1</span></td><td>A stationary or slow-moving rubbish object keeps one stable <code>trackId</code> across detection cycles — no ID churn caused by the coordinate-space matching bug.</td></tr>
+        <tr><td class="id" id="r2"><span class="chip">R2</span></td><td>Bounding boxes are geometrically correct — no aspect-ratio distortion between the model input and the rendered overlay; boxes visually align with objects in the FPV.</td></tr>
+        <tr><td class="id" id="r3"><span class="chip">R3</span></td><td>The capture/inference frame gate is race-free, and <code>clearAllTracks()</code> fully resets tracker state (not just the upload set) with no OOM/ANR regressions.</td></tr>
+        <tr><td class="id" id="r4"><span class="chip">R4</span></td><td>The int8 model path produces correct detections, or is safely disabled with a clear load-time error; a model/label class-count mismatch fails loudly at load rather than silently corrupting parsing.</td></tr>
+      </tbody>
+    </table>
+
+    <div class="grp">Validation against real testing</div>
+    <table>
+      <tbody>
+        <tr><td class="id" id="r5"><span class="chip">R5</span></td><td>On-device TFLite output matches Colab/PC inference on the same images within tolerance — box coordinates, class, and confidence agree, confirming no systematic parsing or coordinate-normalization error.</td></tr>
+        <tr><td class="id" id="r6"><span class="chip">R6</span></td><td>Detection accuracy (precision, recall) is measured on the Roboflow test set, and <code>CONFIDENCE_THRESHOLD</code> / <code>IOU_THRESHOLD</code> are chosen from that data rather than guessed.</td></tr>
+      </tbody>
+    </table>
+
+    <div class="grp">Detection &amp; tracking quality</div>
+    <table>
+      <tbody>
+        <tr><td class="id" id="r7"><span class="chip">R7</span></td><td>Overlay boxes follow objects smoothly between the ~400 ms detection cycles instead of freezing then jumping.</td></tr>
+        <tr><td class="id" id="r8"><span class="chip">R8</span></td><td>False-positive and missed-detection rates are reduced versus the current baseline, quantified on the validation set.</td></tr>
+      </tbody>
+    </table>
+
+    <div class="grp">Performance &amp; data integrity</div>
+    <table>
+      <tbody>
+        <tr><td class="id" id="r9"><span class="chip">R9</span></td><td>Dropped frames stay at 0 and FPV stays smooth across a sustained flight; thermal throttling is mitigated during long static hovers.</td></tr>
+        <tr><td class="id" id="r10"><span class="chip">R10</span></td><td>Firebase records one aggregated point per real rubbish location — no over- or under-counting — and survives signal loss via offline persistence with later sync.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <hr>
+
+  <section>
+    <h2>High-Level Technical Design</h2>
+    <p>The pipeline is unchanged in shape; the plan repairs specific stages and inserts a prediction stage. The diagram marks where each unit lands. Prose in the Implementation Units is authoritative — the diagram only orients.</p>
+    <figure>
+      <svg viewBox="0 0 860 330" width="100%" role="img" aria-labelledby="htd-t htd-d">
+        <title id="htd-t">Detection pipeline data flow with fix locations</title>
+        <desc id="htd-d">Row one: drone feed to texture decode to 640 square capture to letterbox preprocess (unit U3). Then per 400 millisecond cycle down into row two: TFLite YOLOv8n (unit U5 model and int8 correctness) to parse and NMS to track association (unit U2) to overlay, interpolation and Firebase (units U8 and U10). Unit U1 instruments the whole pipeline.</desc>
+        <defs>
+          <marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0 0L10 5L0 10z" fill="#8f8e8a"/>
+          </marker>
+        </defs>
+        <style>
+          .bx{fill:var(--surface-2);stroke:var(--border-strong);stroke-width:1.4;rx:8}
+          .bt{fill:var(--text);font-size:13px;font-weight:600}
+          .bs{fill:var(--muted);font-size:11px}
+          .fx{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1}
+          .fxt{fill:var(--accent-text);font-size:11px;font-weight:700;font-family:var(--mono)}
+          .fl{stroke:#8f8e8a;stroke-width:1.6;fill:none}
+          .cyc{fill:var(--muted);font-size:11px;font-style:italic}
+          .inst{fill:var(--info-text);font-size:11px;font-weight:600}
+        </style>
+
+        <!-- Row 1 -->
+        <rect class="bx" x="20"  y="34" width="170" height="56" rx="8"/>
+        <text class="bt" x="105" y="58" text-anchor="middle">Drone feed</text>
+        <text class="bs" x="105" y="76" text-anchor="middle">VideoFeeder → codec</text>
+
+        <rect class="bx" x="230" y="34" width="170" height="56" rx="8"/>
+        <text class="bt" x="315" y="58" text-anchor="middle">TextureView</text>
+        <text class="bs" x="315" y="76" text-anchor="middle">30 FPS render</text>
+
+        <rect class="bx" x="440" y="34" width="170" height="56" rx="8"/>
+        <text class="bt" x="525" y="58" text-anchor="middle">Capture 640²</text>
+        <text class="bs" x="525" y="76" text-anchor="middle">getBitmap()</text>
+
+        <rect class="bx" x="650" y="34" width="170" height="56" rx="8"/>
+        <text class="bt" x="735" y="58" text-anchor="middle">Letterbox</text>
+        <text class="bs" x="735" y="76" text-anchor="middle">preprocess</text>
+        <rect class="fx" x="742" y="96" width="34" height="17" rx="4"/>
+        <text class="fxt" x="759" y="108" text-anchor="middle">U3</text>
+
+        <line class="fl" x1="190" y1="62" x2="228" y2="62" marker-end="url(#ar)"/>
+        <line class="fl" x1="400" y1="62" x2="438" y2="62" marker-end="url(#ar)"/>
+        <line class="fl" x1="610" y1="62" x2="648" y2="62" marker-end="url(#ar)"/>
+
+        <!-- connector down -->
+        <path class="fl" d="M735 90 L735 150 L525 150 L525 178" marker-end="url(#ar)"/>
+        <text class="cyc" x="640" y="144" text-anchor="middle">gated ~400 ms / cycle</text>
+
+        <!-- Row 2 (right to left) -->
+        <rect class="bx" x="440" y="180" width="170" height="56" rx="8"/>
+        <text class="bt" x="525" y="204" text-anchor="middle">TFLite YOLOv8n</text>
+        <text class="bs" x="525" y="222" text-anchor="middle">float16, GPU</text>
+        <rect class="fx" x="532" y="242" width="34" height="17" rx="4"/>
+        <text class="fxt" x="549" y="254" text-anchor="middle">U5</text>
+
+        <rect class="bx" x="230" y="180" width="170" height="56" rx="8"/>
+        <text class="bt" x="315" y="204" text-anchor="middle">Parse + NMS</text>
+        <text class="bs" x="315" y="222" text-anchor="middle">decode boxes</text>
+
+        <rect class="bx" x="20" y="180" width="170" height="56" rx="8"/>
+        <text class="bt" x="105" y="204" text-anchor="middle">Track assoc.</text>
+        <text class="bs" x="105" y="222" text-anchor="middle">ID + IOU</text>
+        <rect class="fx" x="88" y="242" width="34" height="17" rx="4"/>
+        <text class="fxt" x="105" y="254" text-anchor="middle">U2</text>
+
+        <line class="fl" x1="440" y1="208" x2="402" y2="208" marker-end="url(#ar)"/>
+        <line class="fl" x1="230" y1="208" x2="192" y2="208" marker-end="url(#ar)"/>
+
+        <!-- down to sink -->
+        <path class="fl" d="M105 236 L105 286 L430 286" marker-end="url(#ar)"/>
+
+        <rect class="bx" x="440" y="258" width="380" height="56" rx="8"/>
+        <text class="bt" x="630" y="282" text-anchor="middle">Overlay + interpolation + Firebase upload</text>
+        <text class="bs" x="630" y="300" text-anchor="middle">smooth boxes · geo-grid dedup · offline sync</text>
+        <rect class="fx" x="742" y="240" width="70" height="17" rx="4"/>
+        <text class="fxt" x="777" y="252" text-anchor="middle">U8 · U10</text>
+
+        <text class="inst" x="20" y="20">U1 — file-based metrics instrument the entire pipeline</text>
+      </svg>
+      <figcaption>Fix locations: U3 letterbox preprocessing, U5 model/int8 correctness, U2 track association, U8 interpolation, U10 Firebase aggregation. U1 instrumentation spans all stages.</figcaption>
+    </figure>
+  </section>
+
+  <hr>
+
+  <section>
+    <h2>Key Technical Decisions</h2>
+
+    <div class="card ktd"><p class="dec"><span class="chip">KTD1</span> Fix tracking in normalized coordinate space, one unit system throughout</p>
+      <p>Box centers from <code>YoloDetector</code> are normalized <code>[0,1]</code>, but <code>assignTrackIds()</code> matches against <code>MAX_DISTANCE = 150.0f</code> pixels — so the guard never rejects a match. Rather than convert to pixels ad hoc, keep association in normalized space with a normalized threshold (e.g. ~0.05–0.10 of frame width). Single source of truth for units prevents the class of bug recurring.</p></div>
+
+    <div class="card ktd"><p class="dec"><span class="chip">KTD2</span> Letterbox preprocessing to match training-time input</p>
+      <p><code>getBitmap(640, 640)</code> squashes the 16:9 feed into a square; YOLOv8 was trained on aspect-preserved letterboxed images, so the current input is distorted relative to training — a direct accuracy loss. Resize with aspect preserved and pad, then inverse-map output boxes. This is the highest-leverage detection-quality fix.</p></div>
+
+    <div class="card ktd"><p class="dec"><span class="chip">KTD3</span> Validate before tuning — build the offline harness first</p>
+      <p>Because Logcat is impractical (USB = RC) and thresholds were never data-derived, correctness must be proven against Colab/Roboflow ground truth before any threshold change. Tuning blind risks chasing a parsing bug with a threshold band-aid. The harness (U6) gates the accuracy work (U7, U8).</p></div>
+
+    <div class="card ktd"><p class="dec"><span class="chip">KTD4</span> Smoothness via prediction, not faster inference</p>
+      <p>The knowledge base establishes the Helio G99 is at its inference ceiling (~200 ms) and Dropped=0 already holds. Boxes freeze because the overlay only updates every ~400 ms. The lever is inter-frame interpolation/prediction (linear, or a lightweight per-track Kalman), not squeezing the model.</p></div>
+
+    <div class="card ktd"><p class="dec"><span class="chip">KTD5</span> Geo-grid peak aggregation as the dedup source of truth</p>
+      <p>Upload dedup currently keys only on <code>trackId</code>, which the tracking bug makes unreliable (over-count on churn, under-count on false merges). Move the source of truth to a geographic grid (~11 m via <code>toFixed(4)</code>, matching the web dashboard's KDE/MAUP assumptions) recording the peak count per cell, so data integrity no longer depends solely on tracker stability.</p></div>
+
+    <div class="card ktd"><p class="dec"><span class="chip">KTD6</span> Keep float16 as the active runtime path; make int8 correct but opt-in</p>
+      <p>The active model is <code>best_float16.tflite</code> (float32 I/O, GPU-friendly). The int8 branch in <code>bitmapToInputBuffer</code> uses <code>r + inputZeroPoint</code> instead of the proper quantization formula — dormant today but a trap. Correct it and guard it behind explicit model selection rather than switching the default.</p></div>
+  </section>
+
+  <hr>
+
+  <section>
+    <h2>Implementation Units</h2>
+    <p>Grouped into five milestones, dependency-ordered. Correctness (Milestone 2) lands before validation and quality work, per the stated priority.</p>
+    <div class="subnav">
+      <a href="#u1">U1</a><a href="#u2">U2</a><a href="#u3">U3</a><a href="#u4">U4</a><a href="#u5">U5</a>
+      <a href="#u6">U6</a><a href="#u7">U7</a><a href="#u8">U8</a><a href="#u9">U9</a><a href="#u10">U10</a>
+    </div>
+
+    <div class="grp">Milestone 1 — Instrumentation foundation</div>
+
+    <article class="unit" id="u1">
+      <div class="uhead"><span class="chip">U1</span><h3>File-based metrics logger + structured debug overlay</h3></div>
+      <dl class="strip">
+        <dt>Goal</dt><dd>Replace ad-hoc Toast diagnostics with a rolling CSV/JSONL metrics log on <code>/sdcard</code> plus a compact on-screen overlay, so every later change can be measured offline without Logcat.</dd>
+        <dt>Requirements</dt><dd>Enables R5, R6, R8, R9 (measurement substrate)</dd>
+        <dt>Dependencies</dt><dd>None</dd>
+        <dt>Files</dt><dd><code>app/src/main/java/com/dji/sdk/sample/internal/view/BaseFpvView.java</code>, new <code>internal/util/MetricsLogger.java</code>, new <code>internal/util/MetricsLoggerTest.java</code></dd>
+      </dl>
+      <details><summary>Approach</summary>
+        <ul class="plain">
+          <li>Log per captured frame: timestamp, captureMs, inferMs, droppedCount, detectionCount, activeTrackCount, GPU-vs-CPU flag.</li>
+          <li>Reuse the existing crash-log file pattern; rotate the file by size. Keep writes off the UI thread (append on the processing thread).</li>
+          <li>On-screen overlay shows a live one-line rollup; remove the modulo-30 Toast spam in <code>onSurfaceTextureUpdated</code>.</li>
+        </ul>
+      </details>
+      <details><summary>Test scenarios</summary>
+        <ul>
+          <li>Happy path: 100 simulated frames produce 100 well-formed CSV rows with monotonic timestamps and correct column count.</li>
+          <li>Edge: log file exceeds the rotation size → oldest rows rotated out, no unbounded growth.</li>
+          <li>Edge: zero detections in a frame → row still written with detectionCount=0.</li>
+          <li>Error: <code>/sdcard</code> not writable → logger degrades to no-op without throwing.</li>
+        </ul>
+      </details>
+      <details><summary>Verification</summary><ul class="plain"><li>Pull the log after a bench run; confirm rows parse in a spreadsheet and match the on-screen overlay values.</li></ul></details>
+    </article>
+
+    <div class="grp">Milestone 2 — Correctness bug fixes</div>
+
+    <article class="unit" id="u2">
+      <div class="uhead"><span class="chip">U2</span><h3>Fix track-association coordinate-space mismatch</h3></div>
+      <dl class="strip">
+        <dt>Goal</dt><dd>Make <code>assignTrackIds()</code> reject far matches by comparing normalized centers against a normalized threshold, restoring stable per-object track IDs.</dd>
+        <dt>Requirements</dt><dd>R1; unblocks R7, R10</dd>
+        <dt>Dependencies</dt><dd>U1 (to measure track stability before/after)</dd>
+        <dt>Files</dt><dd><code>app/src/main/java/com/dji/sdk/sample/internal/view/YoloDetector.java</code>, new <code>internal/view/YoloDetectorTrackingTest.java</code></dd>
+      </dl>
+      <div class="callout"><b>Root cause:</b> <code>MAX_DISTANCE = 150.0f</code> is compared against <code>Math.hypot</code> of normalized <code>[0,1]</code> centers (max ≈ 1.41), so the guard never fires and every detection greedily matches the nearest existing track.</div>
+      <details><summary>Approach</summary>
+        <ul class="plain">
+          <li>Set the threshold in normalized units (start ~0.06 of frame diagonal; expose as a tunable constant).</li>
+          <li>Consider replacing greedy nearest-match with IOU-based association (the box already computes IOU) or greedy-by-ascending-distance to reduce ID swaps when objects are close.</li>
+          <li>Leave <code>MAX_LOST_FRAMES</code> semantics intact; verify color-by-trackId in <code>OverlayView</code> stabilizes as a side effect.</li>
+        </ul>
+      </details>
+      <details><summary>Test scenarios</summary>
+        <ul>
+          <li>Covers R1. Happy path: a track at (0.5,0.5) followed by a detection at (0.52,0.51) keeps the same ID across cycles.</li>
+          <li>Edge: two detections 0.5 apart do not collapse into one track; a detection 0.9 away spawns a new ID rather than stealing a distant track.</li>
+          <li>Edge: object lost for &gt;<code>MAX_LOST_FRAMES</code> is pruned; reappearance gets a fresh ID.</li>
+          <li>Edge: empty detection list leaves tracker state consistent (lostFrames increment, pruning correct).</li>
+        </ul>
+      </details>
+      <details><summary>Verification</summary><ul class="plain"><li>From U1 logs, activeTrackCount for a filmed stationary object stays ~1 across a 10 s clip instead of climbing.</li></ul></details>
+    </article>
+
+    <article class="unit" id="u3">
+      <div class="uhead"><span class="chip">U3</span><h3>Letterbox preprocessing + inverse box mapping</h3></div>
+      <dl class="strip">
+        <dt>Goal</dt><dd>Feed the model an aspect-preserved, padded 640² input and map output boxes back to the original frame, removing the squash distortion.</dd>
+        <dt>Requirements</dt><dd>R2; advances R8</dd>
+        <dt>Dependencies</dt><dd>U1</dd>
+        <dt>Files</dt><dd><code>app/src/main/java/com/dji/sdk/sample/internal/view/YoloDetector.java</code>, <code>internal/view/BaseFpvView.java</code>, new <code>internal/view/LetterboxTest.java</code></dd>
+      </dl>
+      <details><summary>Approach</summary>
+        <ul class="plain">
+          <li>Capture at the source aspect (or full frame), then scale-longest-side + pad to 640² (gray pad), tracking scale and pad offsets.</li>
+          <li>In <code>parseOutput</code>, subtract pad and divide by scale before clamping to <code>[0,1]</code> of the original frame, so <code>OverlayView</code> mapping stays correct.</li>
+          <li>Keep the allocation off the hot path where possible; reuse buffers.</li>
+        </ul>
+      </details>
+      <details><summary>Test scenarios</summary>
+        <ul>
+          <li>Covers R2. Happy path: a synthetic 16:9 frame with a known box at frame center maps to a centered box after inverse transform (IoU ≥ 0.95 vs expected).</li>
+          <li>Edge: object at frame edge maps inside <code>[0,1]</code> without being clipped by padding.</li>
+          <li>Edge: square input (1:1) reduces to identity transform (no pad).</li>
+        </ul>
+      </details>
+      <details><summary>Verification</summary><ul class="plain"><li>Visual: boxes sit tight on objects at the left/right edges of the FPV, not shifted inward; confirmed against U6 parity numbers.</li></ul></details>
+    </article>
+
+    <article class="unit" id="u4">
+      <div class="uhead"><span class="chip">U4</span><h3>Concurrency &amp; lifecycle hardening</h3></div>
+      <dl class="strip">
+        <dt>Goal</dt><dd>Remove the frame-gate race and complete the tracker reset so state can't leak across sessions or threads.</dd>
+        <dt>Requirements</dt><dd>R3</dd>
+        <dt>Dependencies</dt><dd>U2 (reset must clear the corrected tracker state)</dd>
+        <dt>Files</dt><dd><code>internal/view/BaseFpvView.java</code>, <code>internal/view/YoloDetector.java</code>, <code>demo/camera/ObjectDetectionView.java</code></dd>
+      </dl>
+      <details><summary>Approach</summary>
+        <ul class="plain">
+          <li>Replace <code>volatile boolean isProcessingFrame</code> with <code>AtomicBoolean</code> + <code>compareAndSet(false,true)</code> to gate the capture atomically.</li>
+          <li>Add a <code>reset()</code> to <code>YoloDetector</code> that clears <code>trackedObjects</code> and <code>nextTrackId</code>; call it from <code>clearAllTracks()</code> alongside <code>uploadedTrackIds.clear()</code>.</li>
+          <li>Wrap <code>CompatibilityList</code> in try-with-resources; delete now-dead <code>frameCount</code>, <code>videoWidth</code>, <code>videoHeight</code>.</li>
+        </ul>
+      </details>
+      <details><summary>Test scenarios</summary>
+        <ul>
+          <li>Covers R3. Happy path: concurrent capture attempts while a frame is in flight → exactly one proceeds, others count as dropped.</li>
+          <li>Edge: <code>clearAllTracks()</code> resets both the upload set and tracker so the next detection starts at trackId 1.</li>
+          <li>Edge: rapid attach/detach of the view leaks no detector/thread (resources closed).</li>
+        </ul>
+      </details>
+      <details><summary>Verification</summary><ul class="plain"><li>Bench a long session; U1 log shows no ANR/OOM and Dropped stays 0.</li></ul></details>
+    </article>
+
+    <article class="unit" id="u5">
+      <div class="uhead"><span class="chip">U5</span><h3>Correct the int8 path + model/label consistency guard</h3></div>
+      <dl class="strip">
+        <dt>Goal</dt><dd>Make int8 quantization mathematically correct and opt-in, and fail loudly when label count ≠ model output channels.</dd>
+        <dt>Requirements</dt><dd>R4</dd>
+        <dt>Dependencies</dt><dd>None (independent of U2–U4)</dd>
+        <dt>Files</dt><dd><code>internal/view/YoloDetector.java</code>, <code>app/src/main/assets/labels.txt</code>, new <code>internal/view/QuantizationTest.java</code></dd>
+      </dl>
+      <div class="callout"><b>Latent bug:</b> <code>bitmapToInputBuffer</code> writes <code>(byte)(r + inputZeroPoint)</code>; correct int8 input is <code>round(r/255f / inputScale) + inputZeroPoint</code>. Dormant because the active model is float16, but it breaks any int8 switch.</div>
+      <details><summary>Approach</summary>
+        <ul class="plain">
+          <li>Fix input quantization and confirm output dequant matches; keep <code>best_float16.tflite</code> as the default <code>MODEL_FILE</code>.</li>
+          <li>At load, read the output tensor's channel dim, compute expected classes = channels − 4, and assert it equals <code>labels.size()</code> (currently 1 = <code>rubbish</code>); surface a clear error toast + log on mismatch.</li>
+        </ul>
+      </details>
+      <details><summary>Test scenarios</summary>
+        <ul>
+          <li>Covers R4. Happy path: with the int8 asset, a fixed input yields dequantized outputs matching a reference within tolerance.</li>
+          <li>Edge: labels file with 2 lines against a 1-class model → load fails with an explicit message, not silent misparse.</li>
+          <li>Edge: float16 model path unaffected (regression guard).</li>
+        </ul>
+      </details>
+      <details><summary>Verification</summary><ul class="plain"><li>Toggle to the int8 asset on the bench and confirm detections appear correctly, then revert default.</li></ul></details>
+    </article>
+
+    <div class="grp">Milestone 3 — Validation against real testing</div>
+
+    <article class="unit" id="u6">
+      <div class="uhead"><span class="chip">U6</span><h3>Offline parity &amp; accuracy harness</h3></div>
+      <dl class="strip">
+        <dt>Goal</dt><dd>Run the Roboflow test set through the on-device pipeline and compare against Colab/PC ground truth to prove the TFLite parsing, letterbox, and NMS are correct, and to produce precision/recall.</dd>
+        <dt>Requirements</dt><dd>R5, R6</dd>
+        <dt>Dependencies</dt><dd>U3, U5</dd>
+        <dt>Files</dt><dd>new <code>internal/view/DetectionHarness.java</code> (asset-image replay mode), new <code>tools/parity_check.py</code>, <code>internal/util/MetricsLogger.java</code></dd>
+      </dl>
+      <div class="callout exec"><b>Execution note:</b> build this harness before tuning any threshold — it is the ground-truth oracle the rest of Milestone 3–4 depends on.</div>
+      <details><summary>Approach</summary>
+        <ul class="plain">
+          <li>Add a replay path that feeds bundled test images (not the live feed) through <code>YoloDetector.detect</code> and dumps predictions to file.</li>
+          <li><code>tools/parity_check.py</code> runs the same <code>.tflite</code> (or the <code>.pt</code>) in Colab on the identical images, then computes per-box IoU, class agreement, and confidence delta vs the device dump.</li>
+          <li>Compute precision/recall/mAP@0.5 against Roboflow labels; export a short report.</li>
+        </ul>
+      </details>
+      <details><summary>Test scenarios</summary>
+        <ul>
+          <li>Covers R5. Parity: for ≥95% of test boxes, device-vs-Colab IoU ≥ 0.9 and class matches; confidence within ±0.05.</li>
+          <li>Covers R6. Accuracy: precision/recall reported per confidence threshold sweep (0.2–0.6).</li>
+          <li>Edge: an image with no rubbish yields zero device detections (no phantom boxes).</li>
+          <li>Diagnostic: any systematic coordinate offset (e.g. constant shift) is flagged as a parity failure, not averaged away.</li>
+        </ul>
+      </details>
+      <details><summary>Verification</summary><ul class="plain"><li>Parity report shows no systematic offset; accuracy table is populated and archived under <code>docs/</code>.</li></ul></details>
+    </article>
+
+    <article class="unit" id="u7">
+      <div class="uhead"><span class="chip">U7</span><h3>Threshold calibration + field stress-test protocol</h3></div>
+      <dl class="strip">
+        <dt>Goal</dt><dd>Choose <code>CONFIDENCE_THRESHOLD</code> and <code>IOU_THRESHOLD</code> from the U6 sweep to minimize false positives without dropping real rubbish, and document a repeatable field test.</dd>
+        <dt>Requirements</dt><dd>R6, R8</dd>
+        <dt>Dependencies</dt><dd>U6</dd>
+        <dt>Files</dt><dd><code>internal/view/YoloDetector.java</code> (constants), <code>demo/camera/ObjectDetectionView.java</code> (upload threshold), new <code>docs/field-test-protocol.md</code></dd>
+      </dl>
+      <details><summary>Approach</summary>
+        <ul class="plain">
+          <li>Pick the operating point from the precision/recall curve; align the detector threshold (0.35) and the upload threshold (0.40) deliberately rather than by accident.</li>
+          <li>Write a protocol covering altitude, speed, rotation rate, and occlusion cases that stress tracker drop and false positives.</li>
+        </ul>
+      </details>
+      <details><summary>Test scenarios</summary>
+        <ul>
+          <li>Covers R8. With the chosen threshold, validation-set false positives drop versus the 0.35/0.40 baseline while recall holds.</li>
+          <li>Edge: threshold documented as a single tunable, not duplicated inconsistently across files.</li>
+          <li><i>Test expectation: the protocol doc itself is non-executable — verified by review, not unit test.</i></li>
+        </ul>
+      </details>
+      <details><summary>Verification</summary><ul class="plain"><li>A short field run logged via U1 shows fewer spurious uploads and no loss of true detections.</li></ul></details>
+    </article>
+
+    <div class="grp">Milestone 4 — Tracking smoothness &amp; performance</div>
+
+    <article class="unit" id="u8">
+      <div class="uhead"><span class="chip">U8</span><h3>Inter-frame box interpolation / prediction</h3></div>
+      <dl class="strip">
+        <dt>Goal</dt><dd>Smooth overlay boxes between the ~400 ms detection cycles so they follow objects instead of freezing then jumping.</dd>
+        <dt>Requirements</dt><dd>R7</dd>
+        <dt>Dependencies</dt><dd>U2 (stable IDs are a precondition for per-track prediction)</dd>
+        <dt>Files</dt><dd><code>internal/view/OverlayView.java</code>, <code>internal/view/YoloDetector.java</code> (expose per-track velocity), new <code>internal/view/InterpolationTest.java</code></dd>
+      </dl>
+      <details><summary>Approach</summary>
+        <ul class="plain">
+          <li>Store last box + a velocity estimate per <code>trackId</code>; between detections, advance boxes on the overlay's own invalidate tick (linear first; upgrade to a small constant-velocity Kalman if needed).</li>
+          <li>Snap to the measured box when a fresh detection arrives to avoid drift accumulation.</li>
+        </ul>
+      </details>
+      <details><summary>Test scenarios</summary>
+        <ul>
+          <li>Covers R7. Happy path: a track moving at constant velocity is predicted within a small error at the mid-cycle tick.</li>
+          <li>Edge: a track that disappears stops being drawn within one cycle (no ghost box left behind).</li>
+          <li>Edge: a new detection snaps the predicted box to the measured position without a visible jump.</li>
+        </ul>
+      </details>
+      <details><summary>Verification</summary><ul class="plain"><li>Visual: boxes track a walking person/object smoothly on the FPV; no stutter between cycles.</li></ul></details>
+    </article>
+
+    <article class="unit" id="u9">
+      <div class="uhead"><span class="chip">U9</span><h3>Adaptive frame skip + motion/thermal-aware gating</h3></div>
+      <dl class="strip">
+        <dt>Goal</dt><dd>Reduce sustained thermal load by skipping inference when the scene is static and adapting the capture interval to measured inference time, keeping Dropped=0.</dd>
+        <dt>Requirements</dt><dd>R9</dd>
+        <dt>Dependencies</dt><dd>U1</dd>
+        <dt>Files</dt><dd><code>internal/view/BaseFpvView.java</code>, optional warm-up in <code>YoloDetector.java</code></dd>
+      </dl>
+      <details><summary>Approach</summary>
+        <ul class="plain">
+          <li>Derive <code>MIN_CAPTURE_INTERVAL_MS</code> from a rolling average of inferMs (from U1) instead of a fixed 400 ms.</li>
+          <li>Cheap frame-difference check: when successive frames are near-identical (static hover), lengthen the interval; restore on motion.</li>
+          <li>Optional one-time warm-up inference on a dummy bitmap at init to absorb shader-compile/DVFS jank.</li>
+        </ul>
+      </details>
+      <details><summary>Test scenarios</summary>
+        <ul>
+          <li>Covers R9. Happy path: under a static scene, inference frequency drops and logged temperature-proxy (inferMs creep) stays flat over a long run.</li>
+          <li>Edge: motion resumes → interval returns to the responsive value within one cycle.</li>
+          <li>Edge: adaptive interval never drops below the safe floor that would reintroduce dropped frames.</li>
+        </ul>
+      </details>
+      <details><summary>Verification</summary><ul class="plain"><li>U1 log over a 10-min run shows inferMs creep reduced versus the fixed-interval baseline, Dropped still 0.</li></ul></details>
+    </article>
+
+    <div class="grp">Milestone 5 — Firebase data integrity</div>
+
+    <article class="unit" id="u10">
+      <div class="uhead"><span class="chip">U10</span><h3>Geo-grid peak aggregation + offline persistence</h3></div>
+      <dl class="strip">
+        <dt>Goal</dt><dd>Make upload record one aggregated point per real location and survive signal loss, so heatmap counts stop over/under-reporting.</dd>
+        <dt>Requirements</dt><dd>R10</dd>
+        <dt>Dependencies</dt><dd>U2 (stable IDs feed correct per-cell counts)</dd>
+        <dt>Files</dt><dd><code>demo/camera/ObjectDetectionView.java</code>, <code>internal/controller/DJISampleApplication.java</code> (persistence init)</dd>
+      </dl>
+      <details><summary>Approach</summary>
+        <ul class="plain">
+          <li>Key dedup on a geo-grid cell (~11 m via <code>toFixed(4)</code> on lat/lng), storing the peak simultaneous count per cell; update Firestore only when a cell's peak increases — matching the web dashboard's KDE/MAUP grid.</li>
+          <li>Enable Firestore offline persistence (local cache) so detections during signal loss queue and auto-sync on reconnect.</li>
+          <li>Preserve existing NaN/zero GPS guards.</li>
+        </ul>
+      </details>
+      <details><summary>Test scenarios</summary>
+        <ul>
+          <li>Covers R10. Happy path: a stationary pile filmed for 10 s writes one aggregated cell record, not one per cycle.</li>
+          <li>Edge: two piles in adjacent grid cells produce two records; two detections in the same cell produce one with the peak count.</li>
+          <li>Error: offline during detection → record queued locally and synced after reconnect; no data loss.</li>
+          <li>Edge: GPS NaN/zero → nothing uploaded (guard preserved).</li>
+        </ul>
+      </details>
+      <details><summary>Verification</summary><ul class="plain"><li>A bench flight with mock GPS yields Firestore counts that match the physical scene, and a forced-offline segment syncs on reconnect.</li></ul></details>
+    </article>
+  </section>
+
+  <hr>
+
+  <section>
+    <h2>Scope Boundaries</h2>
+    <div class="scope">
+      <div class="in"><b>In scope</b> — the Android app pipeline (capture, preprocessing, inference, parsing/NMS, tracking, overlay), model/detection correctness and threshold tuning, on-device + Colab validation, and the Firebase upload/aggregation logic in <code>ObjectDetectionView</code>.</div>
+      <div class="def"><b>Deferred to follow-up</b> — web dashboard code fixes (heatmap KDE, Haversine/MAUP clustering, temporal Calendar Boundary, reverse geocoding). The code is not in this repo; U10 aligns the mobile schema to the dashboard's grid assumptions, and a validation checklist is provided below, but code-level dashboard work waits until that code is shared.</div>
+      <div class="out"><b>Outside this effort</b> — retraining or re-exporting the YOLOv8 model (U6/U7 tune thresholds and preprocessing around the existing weights; a retrain is a separate decision if accuracy stays short), and swapping the DJI SDK or camera architecture.</div>
+    </div>
+    <p style="margin-top:14px"><b>Web dashboard validation checklist (no code changes here):</b></p>
+    <ul class="plain">
+      <li>Confirm the dashboard grid precision matches U10's <code>toFixed(4)</code> cell keying so mobile and web agree on "one location."</li>
+      <li>Verify heatmap intensity reads the aggregated peak count field, not a raw row count, once U10 ships.</li>
+      <li>Re-check temporal Calendar Boundary parsing against the new <code>timestamp</code> records after any format change.</li>
+    </ul>
+  </section>
+
+  <hr>
+
+  <section>
+    <h2>Risks &amp; Dependencies</h2>
+
+    <div class="risk open"><div class="eb">Open · external</div>
+      <b>Web dashboard code unavailable.</b> Dashboard-side fixes and full end-to-end heatmap validation can't be completed until that code is shared. Mitigation: U10 aligns the mobile write schema to the documented grid; dashboard work is explicitly deferred.</div>
+
+    <div class="risk watch"><div class="eb">Watch · hardware</div>
+      <b>Inference ceiling on Helio G99.</b> Performance headroom is limited (~200 ms/frame is near the floor). Smoothness relies on U8 prediction, not faster inference; U9 targets thermal creep, not throughput.</div>
+
+    <div class="risk watch"><div class="eb">Watch · environment</div>
+      <b>Field validation needs an outdoor GPS lock and drone availability.</b> 6+ satellites only lock outdoors after 30–60 s. The offline harness (U6) de-risks this by validating detection accuracy without a flight; only U7/U10 field steps need the drone.</div>
+
+    <div class="risk mit"><div class="eb">Dependency · resolved</div>
+      <b>Ground-truth data exists.</b> The TFLite model and a labeled test set are available on Roboflow, which makes the U6 parity/accuracy harness feasible without new labeling.</div>
+
+    <div class="risk watch"><div class="eb">Watch · schema</div>
+      <b>Changing dedup/aggregation (U10) alters Firestore document shape.</b> Existing <code>waste_detections_v2</code> readers (the dashboard) must tolerate the peak-count field. Mitigation: additive fields, coordinate the change with the dashboard checklist above.</div>
+  </section>
+
+  <hr>
+
+  <section>
+    <h2>Acceptance Examples</h2>
+    <table>
+      <thead><tr><th class="id">ID</th><th>Given / When / Then</th></tr></thead>
+      <tbody>
+        <tr><td class="id" id="ae1"><span class="chip">AE1</span></td><td><b>Given</b> a stationary rubbish pile filmed for 10 s, <b>when</b> detection runs, <b>then</b> exactly one <code>trackId</code> is aggregated and one Firestore record is written (not one per cycle). <i>(R1, R10)</i></td></tr>
+        <tr><td class="id" id="ae2"><span class="chip">AE2</span></td><td><b>Given</b> a 16:9 frame, <b>when</b> preprocessed, <b>then</b> the model input is letterboxed (aspect preserved) and output boxes inverse-map to the original frame with IoU ≥ 0.95 vs expected. <i>(R2)</i></td></tr>
+        <tr><td class="id" id="ae3"><span class="chip">AE3</span></td><td><b>Given</b> the Roboflow test images run on-device and in Colab, <b>when</b> compared, <b>then</b> per-box IoU ≥ 0.9 and class/confidence agree within tolerance. <i>(R5)</i></td></tr>
+        <tr><td class="id" id="ae4"><span class="chip">AE4</span></td><td><b>Given</b> GPS is unavailable (NaN or 0,0), <b>when</b> detections occur, <b>then</b> nothing is uploaded. <i>(R10, existing guard preserved)</i></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <hr>
+
+  <section>
+    <h2>Sources &amp; Research</h2>
+    <ul class="plain">
+      <li><a href="https://github.com/krompium/projek-auv/blob/main/UAV_Waste_Detection_KnowledgeBase.md"><code>UAV_Waste_Detection_KnowledgeBase.md</code></a> — origin document: prior architecture decisions, the debugging log (BUG-01…BUG-18), and the open tracking-smoothness thread.</li>
+      <li><a href="https://github.com/krompium/projek-auv/blob/main/app/src/main/java/com/dji/sdk/sample/internal/view/YoloDetector.java"><code>YoloDetector.java</code></a> — tracking coordinate-space bug (U2), int8 quant bug (U5), NMS/parse (U6).</li>
+      <li><a href="https://github.com/krompium/projek-auv/blob/main/app/src/main/java/com/dji/sdk/sample/internal/view/BaseFpvView.java"><code>BaseFpvView.java</code></a> — 640² square capture (U3), frame gate / <code>isProcessingFrame</code> (U4), throttle (U9).</li>
+      <li><a href="https://github.com/krompium/projek-auv/blob/main/app/src/main/java/com/dji/sdk/sample/demo/camera/ObjectDetectionView.java"><code>ObjectDetectionView.java</code></a> — trackId-only dedup, telemetry, upload threshold (U7, U10).</li>
+      <li><a href="https://github.com/krompium/projek-auv/blob/main/app/src/main/java/com/dji/sdk/sample/internal/view/OverlayView.java"><code>OverlayView.java</code></a> — box rendering, per-cycle update gap driving box freeze (U8).</li>
+      <li>Environment (from knowledge base): TFLite 2.14.0 + GPU delegate, Firebase BOM 34.12.0, Play Services Maps 18.2.0, active model <code>best_float16.tflite</code>, single class <code>rubbish</code>, test SoC Helio G99 / Mali-G57 MC2.</li>
+    </ul>
+  </section>
+
+  <footer class="composition-signal">Composed 2026-07-07 by ce-plan from <code>UAV_Waste_Detection_KnowledgeBase.md</code> and direct source inspection of <code>krompium/projek-auv</code>.</footer>
+
+</div>
+</body>
+</htm
