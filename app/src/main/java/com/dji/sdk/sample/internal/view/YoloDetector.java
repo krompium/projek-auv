@@ -34,8 +34,12 @@ public class YoloDetector {
     private static final int INPUT_SIZE = 640;
     private final BoxTracker tracker = new BoxTracker();
     private static final int MAX_DETECTIONS = 8400;
-    private static final float CONFIDENCE_THRESHOLD = 0.35f;
-    private static final float IOU_THRESHOLD = 0.45f;
+    // Centralized in DetectionConfig (U7): one tunable, calibrated via the
+    // U6 harness sweep, instead of magic numbers scattered across files.
+    private static final float CONFIDENCE_THRESHOLD =
+            com.dji.sdk.sample.internal.util.DetectionConfig.CONFIDENCE_THRESHOLD;
+    private static final float IOU_THRESHOLD =
+            com.dji.sdk.sample.internal.util.DetectionConfig.IOU_THRESHOLD;
 
     private Interpreter tflite;
     private List<String> labels = new ArrayList<>();

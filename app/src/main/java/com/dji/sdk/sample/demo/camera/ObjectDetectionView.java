@@ -152,7 +152,8 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView,
         for (YoloDetector.Detection d : detections) {
             if (d.trackId <= 0) continue;
 
-            if (d.confidence < 0.40f) continue;
+            if (d.confidence < com.dji.sdk.sample.internal.util
+                    .DetectionConfig.UPLOAD_CONFIDENCE_THRESHOLD) continue;
 
             if (!uploadedTrackIds.contains(d.trackId)) {
                 uploadedTrackIds.add(d.trackId);
