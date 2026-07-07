@@ -345,4 +345,19 @@ public class YoloDetector {
             }
         }
     }
-}
+
+    /** Number of currently tracked objects (for metrics/overlay). */
+    public int getActiveTrackCount() {
+        return trackedObjects.size();
+    }
+
+    /** Total track IDs ever assigned in this session (for metrics/overlay). */
+    public int getTotalTrackIdCount() {
+        return nextTrackId - 1;
+    }
+
+    /** Whether the GPU delegate is active (for metrics). */
+    public boolean isGpuActive() {
+        return gpuDelegate != null;
+    }
+}                                                                                                                                                                               

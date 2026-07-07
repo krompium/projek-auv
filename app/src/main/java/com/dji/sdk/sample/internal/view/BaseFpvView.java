@@ -12,8 +12,11 @@ import android.view.TextureView;
 import android.widget.FrameLayout;
 
 import com.dji.sdk.sample.R;
+import com.dji.sdk.sample.internal.util.MetricsLogger;
 
+import java.io.File;
 import java.util.List;
+import java.util.Locale;
 
 import dji.midware.usb.P3.UsbAccessoryService;
 import dji.sdk.camera.VideoFeeder;
@@ -38,6 +41,7 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
     private int capturedFrameCount = 0;
     private int videoWidth = 1920;
     private int videoHeight = 1080;
+    private MetricsLogger metricsLogger;
 
     // Callback to notify parent view of detections
     public interface DetectionCallback {
@@ -55,6 +59,11 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
     }
 
     private void initUI() {
+        // File-based metrics (USB is occupied by the RC, Logcat is impractical)
+        metricsLogger = new MetricsLogger(
+                new File(getContext().getExternalFilesDir(null), "metrics"));
+        metricsLogger.logEvent("LIFECYCLE", "BaseFpvView init");
+
         // Start background processing thread
         processingThread = new HandlerThread("YuvProcessingThread");
         processingThread.start();
@@ -217,16 +226,24 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
                     final long inferMs = System.currentTimeMillis() - inferStart;
                     frameBitmap.recycle();
 
-                    // Show diagnostics every 30 captured frames
-                    if (capturedFrameCount % 30 == 0) {
-                        new Handler(android.os.Looper.getMainLooper()).post(() ->
-                                android.widget.Toast.makeText(getContext(),
-                                        "Capture: " + captureMs + "ms | Infer: " + inferMs + "ms | Dropped: " + droppedFrameCount,
-                                        android.widget.Toast.LENGTH_LONG).show());
+                    // File-based per-frame metrics (replaces Toast spam)
+                    final int activeTracks = yoloDetector.getActiveTrackCount();
+                    final int totalTrackIds = yoloDetector.getTotalTrackIdCount();
+                    if (metricsLogger != null) {
+                        metricsLogger.logFrame(System.currentTimeMillis(), captureMs, inferMs,
+                                droppedFrameCount, detections.size(), activeTracks, totalTrackIds,
+                                yoloDetector.isGpuActive(), MIN_CAPTURE_INTERVAL_MS);
                     }
+                    final String debugLine = String.format(Locale.US,
+                            "cap %dms  inf %dms  drop %d  det %d  trk %d/%d",
+                            captureMs, inferMs, droppedFrameCount,
+                            detections.size(), activeTracks, totalTrackIds);
 
                     new Handler(android.os.Looper.getMainLooper()).post(() -> {
-                        if (overlayView != null) overlayView.updateDetections(detections);
+                        if (overlayView != null) {
+                            overlayView.setDebugInfo(debugLine);
+                            overlayView.updateDetections(detections);
+                        }
                         if (detectionCallback != null && !detections.isEmpty())
                             detectionCallback.onDetectionResult(detections);
                     });
@@ -240,28 +257,4 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
     private void updateTextureViewTransform() {
         if (mVideoSurface == null) return;
 
-        android.util.DisplayMetrics dm = new android.util.DisplayMetrics();
-        ((android.app.Activity) getContext()).getWindowManager()
-                .getDefaultDisplay().getMetrics(dm);
-        int parentW = dm.widthPixels;
-        int parentH = dm.heightPixels;
-
-        int newH = parentH;
-        int newW = (int)(parentH * 16f / 9f);
-        if (newW > parentW) {
-            newW = parentW;
-            newH = (int)(parentW * 9f / 16f);
-        }
-
-        FrameLayout.LayoutParams videoParams = new FrameLayout.LayoutParams(newW, newH);
-        videoParams.gravity = android.view.Gravity.CENTER;
-        mVideoSurface.setLayoutParams(videoParams);
-
-        if (overlayView != null) {
-            FrameLayout.LayoutParams overlayParams = new FrameLayout.LayoutParams(newW, newH);
-            overlayParams.gravity = android.view.Gravity.CENTER;
-            overlayView.setLayoutParams(overlayParams);
-        }
-    }
-
-}
+        android.util.DisplayMetric
