@@ -8,6 +8,8 @@ import android.graphics.Rect;
 import android.graphics.RectF;
 import android.util.Log;
 
+import com.dji.sdk.sample.internal.util.QuantUtil;
+
 import org.tensorflow.lite.Interpreter;
 import org.tensorflow.lite.gpu.CompatibilityList;
 import org.tensorflow.lite.gpu.GpuDelegate;
@@ -94,6 +96,18 @@ public class YoloDetector {
 
             tflite = new Interpreter(modelBuffer, options);
 
+            // Fail loudly on model/label mismatch (R4): a silent mismatch
+            // corrupts parseOutput's class-score indexing.
+            int[] outShape = tflite.getOutputTensor(0).shape(); // [1, 4+C, 8400]
+            int modelClasses = (outShape.length >= 2) ? outShape[1] - 4 : -1;
+            if (modelClasses != labels.size()) {
+                String msg = "Model/label mismatch: model outputs " + modelClasses
+                        + " class(es), labels.txt has " + labels.size();
+                tflite.close();
+                tflite = null;
+                throw new IllegalStateException(msg);
+            }
+
             // Detect if model is int8 quantized
             org.tensorflow.lite.DataType inputType =
                     tflite.getInputTensor(0).dataType();
@@ -127,6 +141,11 @@ public class YoloDetector {
 
         } catch (Exception e) {
             Log.e(TAG, "Failed to initialize YoloDetector", e);
+            final String err = e.getMessage();
+            new android.os.Handler(android.os.Looper.getMainLooper()).post(() ->
+                    android.widget.Toast.makeText(context,
+                            "YOLO init error: " + err,
+                            android.widget.Toast.LENGTH_LONG).show());
         }
     }
 
@@ -165,9 +184,12 @@ public class YoloDetector {
             int b =  pixel        & 0xFF;
 
             if (isInt8) {
-                inputBuffer.put((byte) (r + inputZeroPoint));
-                inputBuffer.put((byte) (g + inputZeroPoint));
-                inputBuffer.put((byte) (b + inputZeroPoint));
+                // Correct affine quantization: round((c/255)/scale) + zeroPoint.
+                // The old code wrote (byte)(c + zeroPoint), which is wrong for
+                // any real scale and broke the int8 path (R4).
+                inputBuffer.put(QuantUtil.quantizeChannel(r, inputScale, inputZeroPoint));
+                inputBuffer.put(QuantUtil.quantizeChannel(g, inputScale, inputZeroPoint));
+                inputBuffer.put(QuantUtil.quantizeChannel(b, inputScale, inputZeroPoint));
             } else {
                 inputBuffer.putFloat(r / 255.0f);
                 inputBuffer.putFloat(g / 255.0f);
