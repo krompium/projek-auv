@@ -110,4 +110,31 @@ public class OverlayView extends View {
             float right  = box.right  * viewWidth;
             float bottom = box.bottom * viewHeight;
 
-            can
+            canvas.drawRect(left, top, right, bottom, boxPaint);
+
+            String labelText;
+            int confidencePercent = Math.round(det.confidence * 100);
+
+            if (det.trackId > 0) {
+                labelText = String.format(Locale.US, "%s #%d (%d%%)", det.label, det.trackId, confidencePercent);
+            } else {
+                labelText = String.format(Locale.US, "%s (%d%%)", det.label, confidencePercent);
+            }
+
+            float textWidth  = textPaint.measureText(labelText);
+            float textHeight = textPaint.getTextSize();
+            float padding    = 6f;
+
+            float bgLeft   = left;
+            float bgTop    = Math.max(0, top - textHeight - padding * 2);
+            float bgRight  = left + textWidth + padding * 2;
+            float bgBottom = Math.max(textHeight + padding * 2, top);
+
+            textBgPaint.setColor(boxPaint.getColor());
+            textBgPaint.setAlpha(200);
+
+            canvas.drawRect(bgLeft, bgTop, bgRight, bgBottom, textBgPaint);
+            canvas.drawText(labelText, bgLeft + padding, bgBottom - padding, textPaint);
+        }
+    }
+}

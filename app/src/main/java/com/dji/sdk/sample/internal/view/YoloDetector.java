@@ -2,6 +2,9 @@ package com.dji.sdk.sample.internal.view;
 
 import android.content.Context;
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Rect;
 import android.graphics.RectF;
 import android.util.Log;
 
@@ -27,8 +30,7 @@ public class YoloDetector {
     private static final String LABELS_FILE = "labels.txt";
 
     private static final int INPUT_SIZE = 640;
-    private int nextTrackId = 1;
-    private List<TrackedObject> trackedObjects = new ArrayList<>();
+    private final BoxTracker tracker = new BoxTracker();
     private static final int MAX_DETECTIONS = 8400;
     private static final float CONFIDENCE_THRESHOLD = 0.35f;
     private static final float IOU_THRESHOLD = 0.45f;
@@ -36,6 +38,12 @@ public class YoloDetector {
     private Interpreter tflite;
     private List<String> labels = new ArrayList<>();
     private ByteBuffer inputBuffer;
+
+    // Reused letterbox target (allocation kept off the hot path)
+    private Bitmap letterboxBitmap;
+    private Canvas letterboxCanvas;
+    /** YOLO-standard gray padding (114,114,114). */
+    private static final int PAD_COLOR = Color.rgb(114, 114, 114);
 
     private float inputScale;
     private int inputZeroPoint;
@@ -49,23 +57,15 @@ public class YoloDetector {
         public final String label;
         public final float confidence;
         public int trackId;
+        /** Track velocity in normalized units/second (for overlay prediction). */
+        public float velocityX, velocityY;
+        /** Wall-clock time (ms) this detection was produced. */
+        public long timestampMs;
 
         public Detection(RectF boundingBox, String label, float confidence) {
             this.boundingBox = boundingBox;
             this.label = label;
             this.confidence = confidence;
-        }
-    }
-
-    private static class TrackedObject {
-        int id;
-        RectF rect;
-        int lostFrames;
-
-        public TrackedObject(int id, RectF rect) {
-            this.id = id;
-            this.rect = rect;
-            this.lostFrames = 0;
         }
     }
 
@@ -76,19 +76,20 @@ public class YoloDetector {
 
             Interpreter.Options options = new Interpreter.Options();
 
-            CompatibilityList compatList = new CompatibilityList();
-            if (compatList.isDelegateSupportedOnThisDevice()) {
-                GpuDelegate.Options delegateOptions = compatList.getBestOptionsForThisDevice();
-                gpuDelegate = new GpuDelegate(delegateOptions);
-                options.addDelegate(gpuDelegate);
-                new android.os.Handler(android.os.Looper.getMainLooper()).post(() ->
-                        android.widget.Toast.makeText(context,
-                                "GPU Delegate: Active", android.widget.Toast.LENGTH_LONG).show());
-            } else {
-                options.setNumThreads(4);
-                new android.os.Handler(android.os.Looper.getMainLooper()).post(() ->
-                        android.widget.Toast.makeText(context,
-                                "GPU not supported — CPU fallback (4 threads)", android.widget.Toast.LENGTH_LONG).show());
+            try (CompatibilityList compatList = new CompatibilityList()) {
+                if (compatList.isDelegateSupportedOnThisDevice()) {
+                    GpuDelegate.Options delegateOptions = compatList.getBestOptionsForThisDevice();
+                    gpuDelegate = new GpuDelegate(delegateOptions);
+                    options.addDelegate(gpuDelegate);
+                    new android.os.Handler(android.os.Looper.getMainLooper()).post(() ->
+                            android.widget.Toast.makeText(context,
+                                    "GPU Delegate: Active", android.widget.Toast.LENGTH_LONG).show());
+                } else {
+                    options.setNumThreads(4);
+                    new android.os.Handler(android.os.Looper.getMainLooper()).post(() ->
+                            android.widget.Toast.makeText(context,
+                                    "GPU not supported — CPU fallback (4 threads)", android.widget.Toast.LENGTH_LONG).show());
+                }
             }
 
             tflite = new Interpreter(modelBuffer, options);
@@ -180,7 +181,30 @@ public class YoloDetector {
         if (tflite == null || bitmap == null) return results;
 
         try {
-            bitmapToInputBuffer(bitmap);
+            // Aspect-preserving letterbox to the square model input (R2).
+            // getBitmap(640, 640) used to squash 16:9 into a square, which is
+            // distorted relative to YOLOv8's letterboxed training input.
+            Letterbox lb = Letterbox.compute(
+                    bitmap.getWidth(), bitmap.getHeight(), INPUT_SIZE);
+            Bitmap modelInput;
+            if (lb.isIdentity() && bitmap.getWidth() == INPUT_SIZE) {
+                modelInput = bitmap;
+            } else {
+                if (letterboxBitmap == null) {
+                    letterboxBitmap = Bitmap.createBitmap(
+                            INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ARGB_8888);
+                    letterboxCanvas = new Canvas(letterboxBitmap);
+                }
+                letterboxCanvas.drawColor(PAD_COLOR);
+                letterboxCanvas.drawBitmap(bitmap,
+                        new Rect(0, 0, bitmap.getWidth(), bitmap.getHeight()),
+                        new Rect(lb.padX, lb.padY,
+                                lb.padX + lb.contentWidth, lb.padY + lb.contentHeight),
+                        null);
+                modelInput = letterboxBitmap;
+            }
+
+            bitmapToInputBuffer(modelInput);
 
             int numClasses = labels.size();
             float[][][] output = new float[1][4 + numClasses][MAX_DETECTIONS];
@@ -199,7 +223,7 @@ public class YoloDetector {
                 tflite.run(inputBuffer, output);
             }
 
-            results = parseOutput(output[0], numClasses);
+            results = parseOutput(output[0], numClasses, lb);
 
         } catch (Exception e) {
             Log.e(TAG, "Inference error", e);
@@ -208,7 +232,7 @@ public class YoloDetector {
         return results;
     }
 
-    private List<Detection> parseOutput(float[][] output, int numClasses) {
+    private List<Detection> parseOutput(float[][] output, int numClasses, Letterbox lb) {
         List<Detection> detections = new ArrayList<>();
 
         for (int i = 0; i < MAX_DETECTIONS; i++) {
@@ -230,15 +254,17 @@ public class YoloDetector {
             float w  = output[2][i];
             float h  = output[3][i];
 
-            float left   = Math.max(0f, Math.min(1f, cx - w / 2f));
-            float top    = Math.max(0f, Math.min(1f, cy - h / 2f));
-            float right  = Math.max(0f, Math.min(1f, cx + w / 2f));
-            float bottom = Math.max(0f, Math.min(1f, cy + h / 2f));
+            // Box in model-input (letterboxed) normalized coords, then
+            // inverse-mapped to source-frame normalized coords (clamped).
+            float[] box = new float[]{
+                    cx - w / 2f, cy - h / 2f, cx + w / 2f, cy + h / 2f};
+            lb.inverseMapNormalized(box);
+            if (box[2] <= box[0] || box[3] <= box[1]) continue; // fully in padding
 
             String label = (bestClass < labels.size()) ?
                     labels.get(bestClass) : "unknown";
             detections.add(new Detection(
-                    new RectF(left, top, right, bottom), label, maxScore));
+                    new RectF(box[0], box[1], box[2], box[3]), label, maxScore));
         }
 
         return applyNMS(detections);
@@ -291,73 +317,60 @@ public class YoloDetector {
             gpuDelegate.close();
             gpuDelegate = null;
         }
+        if (letterboxBitmap != null) {
+            letterboxBitmap.recycle();
+            letterboxBitmap = null;
+            letterboxCanvas = null;
+        }
     }
 
+    /**
+     * Associates detections with tracks via {@link BoxTracker}, entirely in
+     * normalized [0,1] coordinates. (The old implementation compared
+     * normalized centers against a 150-pixel threshold, which could never
+     * reject a match — the root cause of the unstable track IDs.)
+     */
     private void assignTrackIds(List<Detection> currentDetections) {
-        float MAX_DISTANCE = 150.0f;
-        int MAX_LOST_FRAMES = 5;
-
-        if (trackedObjects.isEmpty()) {
-            for (Detection d : currentDetections) {
-                d.trackId = nextTrackId++;
-                trackedObjects.add(new TrackedObject(d.trackId, d.boundingBox));
-            }
-            return;
-        }
-
-        boolean[] matchedTracks = new boolean[trackedObjects.size()];
-
+        long nowMs = System.currentTimeMillis();
+        List<float[]> boxes = new ArrayList<>(currentDetections.size());
         for (Detection d : currentDetections) {
-            float centerX = d.boundingBox.centerX();
-            float centerY = d.boundingBox.centerY();
-
-            int bestTrackIdx = -1;
-            float minDistance = MAX_DISTANCE;
-
-            for (int j = 0; j < trackedObjects.size(); j++) {
-                if (matchedTracks[j]) continue;
-                TrackedObject t = trackedObjects.get(j);
-                float dist = (float) Math.hypot(centerX - t.rect.centerX(), centerY - t.rect.centerY());
-
-                if (dist < minDistance) {
-                    minDistance = dist;
-                    bestTrackIdx = j;
-                }
-            }
-
-            if (bestTrackIdx != -1) {
-                matchedTracks[bestTrackIdx] = true;
-                d.trackId = trackedObjects.get(bestTrackIdx).id;
-                trackedObjects.get(bestTrackIdx).rect = d.boundingBox;
-                trackedObjects.get(bestTrackIdx).lostFrames = 0;
-            } else {
-                d.trackId = nextTrackId++;
-                trackedObjects.add(new TrackedObject(d.trackId, d.boundingBox));
-            }
+            boxes.add(new float[]{
+                    d.boundingBox.left, d.boundingBox.top,
+                    d.boundingBox.right, d.boundingBox.bottom});
         }
 
-        for (int j = trackedObjects.size() - 1; j >= 0; j--) {
-            if (!matchedTracks[j]) {
-                trackedObjects.get(j).lostFrames++;
-                if (trackedObjects.get(j).lostFrames > MAX_LOST_FRAMES) {
-                    trackedObjects.remove(j);
-                }
-            }
+        List<BoxTracker.Assignment> assignments = tracker.assign(boxes, nowMs);
+        for (int i = 0; i < currentDetections.size(); i++) {
+            Detection d = currentDetections.get(i);
+            BoxTracker.Assignment a = assignments.get(i);
+            d.trackId = a.trackId;
+            d.velocityX = a.vx;
+            d.velocityY = a.vy;
+            d.timestampMs = nowMs;
         }
+    }
+
+    /**
+     * Full tracker reset: clears all tracks AND the ID counter, so the next
+     * detection starts at trackId 1. (clearAllTracks() used to clear only the
+     * uploaded-ID set, leaking tracker state across sessions — R3.)
+     */
+    public void reset() {
+        tracker.reset();
     }
 
     /** Number of currently tracked objects (for metrics/overlay). */
     public int getActiveTrackCount() {
-        return trackedObjects.size();
+        return tracker.getActiveCount();
     }
 
     /** Total track IDs ever assigned in this session (for metrics/overlay). */
     public int getTotalTrackIdCount() {
-        return nextTrackId - 1;
+        return tracker.getTotalCreated();
     }
 
     /** Whether the GPU delegate is active (for metrics). */
     public boolean isGpuActive() {
         return gpuDelegate != null;
     }
-}                                                                                                                                                                               
+}

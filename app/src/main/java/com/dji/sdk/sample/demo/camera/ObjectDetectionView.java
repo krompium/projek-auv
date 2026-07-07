@@ -185,6 +185,9 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView,
     public void clearAllTracks() {
         mainHandler.post(() -> {
             uploadedTrackIds.clear();
+            // Complete the reset: clear detector tracks + ID counter too (R3)
+            BaseFpvView baseFpvView = findViewById(R.id.base_fpv_view);
+            if (baseFpvView != null) baseFpvView.resetTracker();
             tvUploadStatus.setText("Memori Tracker Direset");
         });
     }

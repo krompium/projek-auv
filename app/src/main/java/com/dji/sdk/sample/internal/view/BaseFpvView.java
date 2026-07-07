@@ -17,6 +17,7 @@ import com.dji.sdk.sample.internal.util.MetricsLogger;
 import java.io.File;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import dji.midware.usb.P3.UsbAccessoryService;
 import dji.sdk.camera.VideoFeeder;
@@ -30,17 +31,19 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
 
     private HandlerThread processingThread;
     private Handler processingHandler;
-    private volatile boolean isProcessingFrame = false;
+    /**
+     * Frame gate. compareAndSet makes the capture decision atomic: the old
+     * volatile check-then-set had a race window against the processing
+     * thread's reset in finally{}, allowing two frames in flight.
+     */
+    private final AtomicBoolean isProcessingFrame = new AtomicBoolean(false);
     private volatile YoloDetector yoloDetector = null;
     private OverlayView overlayView;
 
-    private int frameCount = 0;
     private int droppedFrameCount = 0;
     private long lastCaptureStartTime = 0;
     private static final long MIN_CAPTURE_INTERVAL_MS = 400; // ms between capture attempts
     private int capturedFrameCount = 0;
-    private int videoWidth = 1920;
-    private int videoHeight = 1080;
     private MetricsLogger metricsLogger;
 
     // Callback to notify parent view of detections
@@ -51,6 +54,17 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
 
     public void setDetectionCallback(DetectionCallback callback) {
         this.detectionCallback = callback;
+    }
+
+    /**
+     * Full tracker reset (tracks + ID counter). Called from
+     * ObjectDetectionView.clearAllTracks() so "reset memori tracker" clears
+     * detector state too, not just the uploaded-ID set.
+     */
+    public void resetTracker() {
+        YoloDetector detector = yoloDetector;
+        if (detector != null) detector.reset();
+        if (metricsLogger != null) metricsLogger.logEvent("TRACKER", "reset requested");
     }
 
     public BaseFpvView(Context context, AttributeSet attrs) {
@@ -195,18 +209,18 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
         if (now - lastCaptureStartTime < MIN_CAPTURE_INTERVAL_MS) return;
         lastCaptureStartTime = now;
 
-        // Measure dropped frames
-        if (isProcessingFrame) {
+        // Atomic frame gate: exactly one frame in flight, others count as dropped.
+        if (!isProcessingFrame.compareAndSet(false, true)) {
             droppedFrameCount++;
             return;
         }
-
-        isProcessingFrame = true;
         capturedFrameCount++;
 
-        // Measure getBitmap time on UI thread
+        // Measure getBitmap time on UI thread.
+        // Capture at the source 16:9 aspect (640x360) — YoloDetector letterboxes
+        // to the square model input, so no squash distortion is introduced (R2).
         long captureStart = System.currentTimeMillis();
-        final Bitmap frameBitmap = mVideoSurface.getBitmap(640, 640);
+        final Bitmap frameBitmap = mVideoSurface.getBitmap(640, 360);
         final long captureMs = System.currentTimeMillis() - captureStart;
 
         processingHandler.post(new Runnable() {
@@ -248,7 +262,7 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
                             detectionCallback.onDetectionResult(detections);
                     });
                 } finally {
-                    isProcessingFrame = false;
+                    isProcessingFrame.set(false);
                 }
             }
         });
@@ -257,4 +271,28 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
     private void updateTextureViewTransform() {
         if (mVideoSurface == null) return;
 
-        android.util.DisplayMetric
+        android.util.DisplayMetrics dm = new android.util.DisplayMetrics();
+        ((android.app.Activity) getContext()).getWindowManager()
+                .getDefaultDisplay().getMetrics(dm);
+        int parentW = dm.widthPixels;
+        int parentH = dm.heightPixels;
+
+        int newH = parentH;
+        int newW = (int)(parentH * 16f / 9f);
+        if (newW > parentW) {
+            newW = parentW;
+            newH = (int)(parentW * 9f / 16f);
+        }
+
+        FrameLayout.LayoutParams videoParams = new FrameLayout.LayoutParams(newW, newH);
+        videoParams.gravity = android.view.Gravity.CENTER;
+        mVideoSurface.setLayoutParams(videoParams);
+
+        if (overlayView != null) {
+            FrameLayout.LayoutParams overlayParams = new FrameLayout.LayoutParams(newW, newH);
+            overlayParams.gravity = android.view.Gravity.CENTER;
+            overlayView.setLayoutParams(overlayParams);
+        }
+    }
+
+}
