@@ -12,6 +12,7 @@ import android.view.TextureView;
 import android.widget.FrameLayout;
 
 import com.dji.sdk.sample.R;
+import com.dji.sdk.sample.internal.util.AdaptiveInterval;
 import com.dji.sdk.sample.internal.util.MetricsLogger;
 
 import java.io.File;
@@ -42,9 +43,16 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
 
     private int droppedFrameCount = 0;
     private long lastCaptureStartTime = 0;
-    private static final long MIN_CAPTURE_INTERVAL_MS = 400; // ms between capture attempts
     private int capturedFrameCount = 0;
     private MetricsLogger metricsLogger;
+
+    // Adaptive capture gating (U9, R9): interval derived from the measured
+    // cycle time; stretched on static scenes for thermal relief.
+    private volatile long adaptiveIntervalMs = 400;
+    private float emaCycleMs = 300f;
+    private int[] prevSignature = null;
+    private int staticStreak = 0;
+    private static final int SIGNATURE_GRID = 8; // 8x8 luminance samples
 
     // Callback to notify parent view of detections
     public interface DetectionCallback {
@@ -97,6 +105,20 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
                                     android.widget.Toast.LENGTH_SHORT).show();
                         }
                     });
+                    // Warm-up inference (U9): absorbs GPU shader compilation /
+                    // DVFS ramp so the first real frame isn't a jank spike.
+                    try {
+                        Bitmap warmup = Bitmap.createBitmap(640, 360, Bitmap.Config.ARGB_8888);
+                        long t0 = System.currentTimeMillis();
+                        yoloDetector.detect(warmup);
+                        warmup.recycle();
+                        yoloDetector.reset(); // warm-up must not leave track state
+                        if (metricsLogger != null) {
+                            metricsLogger.logEvent("WARMUP",
+                                    "first inference " + (System.currentTimeMillis() - t0) + " ms");
+                        }
+                    } catch (Throwable ignored) {
+                    }
                     // Offline parity harness (U6): one-shot replay of bundled
                     // test images when the run_harness marker file exists.
                     DetectionHarness.runIfRequested(
@@ -210,7 +232,7 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
         if (mVideoSurface == null) return;
 
         long now = System.currentTimeMillis();
-        if (now - lastCaptureStartTime < MIN_CAPTURE_INTERVAL_MS) return;
+        if (now - lastCaptureStartTime < adaptiveIntervalMs) return;
         lastCaptureStartTime = now;
 
         // Atomic frame gate: exactly one frame in flight, others count as dropped.
@@ -238,11 +260,23 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
                         return;
                     }
 
+                    // Static-scene signature BEFORE inference recycles the frame
+                    int[] signature = computeSignature(frameBitmap);
+
                     // Measure inference time
                     long inferStart = System.currentTimeMillis();
                     List<YoloDetector.Detection> detections = yoloDetector.detect(frameBitmap);
                     final long inferMs = System.currentTimeMillis() - inferStart;
                     frameBitmap.recycle();
+
+                    // Adaptive interval (U9): follow the measured cycle time,
+                    // stretch on static scenes (thermal relief), snap back on motion.
+                    emaCycleMs = AdaptiveInterval.updateEma(emaCycleMs, captureMs + inferMs);
+                    boolean staticScene = AdaptiveInterval.isStatic(prevSignature, signature);
+                    prevSignature = signature;
+                    staticStreak = staticScene ? staticStreak + 1 : 0;
+                    adaptiveIntervalMs = AdaptiveInterval.compute(emaCycleMs,
+                            staticStreak >= AdaptiveInterval.STATIC_STREAK_THRESHOLD);
 
                     // File-based per-frame metrics (replaces Toast spam)
                     final int activeTracks = yoloDetector.getActiveTrackCount();
@@ -250,7 +284,7 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
                     if (metricsLogger != null) {
                         metricsLogger.logFrame(System.currentTimeMillis(), captureMs, inferMs,
                                 droppedFrameCount, detections.size(), activeTracks, totalTrackIds,
-                                yoloDetector.isGpuActive(), MIN_CAPTURE_INTERVAL_MS);
+                                yoloDetector.isGpuActive(), adaptiveIntervalMs);
                     }
                     final String debugLine = String.format(Locale.US,
                             "cap %dms  inf %dms  drop %d  det %d  trk %d/%d",
@@ -270,6 +304,26 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
                 }
             }
         });
+    }
+
+    /**
+     * Cheap 8x8 luminance signature for static-scene detection (U9).
+     * ~64 pixel reads per frame — negligible vs the 200 ms inference.
+     */
+    private static int[] computeSignature(Bitmap bmp) {
+        if (bmp == null) return null;
+        int[] sig = new int[SIGNATURE_GRID * SIGNATURE_GRID];
+        int w = bmp.getWidth(), h = bmp.getHeight();
+        int k = 0;
+        for (int gy = 0; gy < SIGNATURE_GRID; gy++) {
+            for (int gx = 0; gx < SIGNATURE_GRID; gx++) {
+                int x = (int) ((gx + 0.5f) * w / SIGNATURE_GRID);
+                int y = (int) ((gy + 0.5f) * h / SIGNATURE_GRID);
+                int p = bmp.getPixel(x, y);
+                sig[k++] = (((p >> 16) & 0xFF) * 3 + ((p >> 8) & 0xFF) * 6 + (p & 0xFF)) / 10;
+            }
+        }
+        return sig;
     }
 
     private void updateTextureViewTransform() {
