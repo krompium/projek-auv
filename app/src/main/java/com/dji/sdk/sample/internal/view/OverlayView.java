@@ -93,11 +93,23 @@ public class OverlayView extends View {
 
         float viewWidth  = getWidth();
         float viewHeight = getHeight();
+        long now = System.currentTimeMillis();
+        boolean anyAlive = false;
 
         for (YoloDetector.Detection det : detections) {
             if (det.boundingBox == null) continue;
 
-            RectF box = det.boundingBox;
+            // Inter-frame prediction (U8, R7): advance the box along the
+            // track velocity between ~400 ms detection cycles; stop drawing
+            // stale tracks (ghost removal) after the extrapolation window.
+            long dtMs = (det.timestampMs > 0) ? (now - det.timestampMs) : 0;
+            if (BoxInterpolator.isExpired(dtMs)) continue;
+            anyAlive = true;
+            float[] p = BoxInterpolator.predict(
+                    det.boundingBox.left, det.boundingBox.top,
+                    det.boundingBox.right, det.boundingBox.bottom,
+                    det.velocityX, det.velocityY, dtMs);
+            RectF box = new RectF(p[0], p[1], p[2], p[3]);
 
             if (det.trackId > 0) {
                 boxPaint.setColor(TRACK_COLORS[det.trackId % TRACK_COLORS.length]);
@@ -136,5 +148,9 @@ public class OverlayView extends View {
             canvas.drawRect(bgLeft, bgTop, bgRight, bgBottom, textBgPaint);
             canvas.drawText(labelText, bgLeft + padding, bgBottom - padding, textPaint);
         }
+
+        // Keep predicting between detection cycles at ~30 FPS while any
+        // track is alive; stops automatically once all tracks expire.
+        if (anyAlive) postInvalidateDelayed(33);
     }
 }
