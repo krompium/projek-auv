@@ -37,7 +37,6 @@ import com.google.android.gms.maps.model.MarkerOptions;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -59,8 +58,10 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView,
     // Firebase
     private FirebaseFirestore db;
 
-    // --- DEEPSORT MEMORY TRACKER ---
-    private HashSet<Integer> uploadedTrackIds = new HashSet<>();
+    // Geo-grid peak aggregation (U10, R10): dedup source of truth is the
+    // ~11 m grid cell, not the trackId (which churn made unreliable).
+    private final com.dji.sdk.sample.internal.util.GeoGridAggregator gridAggregator =
+            new com.dji.sdk.sample.internal.util.GeoGridAggregator();
 
     // GPS state
     private double currentLat = 0, currentLng = 0, currentAlt = 0;
@@ -97,9 +98,18 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView,
             }
         });
 
-        // Firebase
-        try { db = FirebaseFirestore.getInstance(); }
-        catch (Exception e) { db = null; }
+        // Firebase — offline persistence ON so detections during signal loss
+        // queue locally and auto-sync on reconnect (R10).
+        try {
+            db = FirebaseFirestore.getInstance();
+            db.setFirestoreSettings(
+                    new com.google.firebase.firestore.FirebaseFirestoreSettings.Builder()
+                            .setPersistenceEnabled(true)
+                            .build());
+        } catch (Exception e) {
+            try { db = FirebaseFirestore.getInstance(); }
+            catch (Exception e2) { db = null; }
+        }
 
         setupDetectionCallback();
     }
@@ -149,43 +159,65 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView,
         if (Double.isNaN(currentLat) || Double.isNaN(currentLng)) return;
         if (currentLat == 0 && currentLng == 0) return;
 
+        // Count qualifying detections in THIS cycle (simultaneous count),
+        // then let the geo-grid decide whether the cell's peak increased.
+        int count = 0;
+        float bestConfidence = 0f;
+        String label = "rubbish";
         for (YoloDetector.Detection d : detections) {
             if (d.trackId <= 0) continue;
-
             if (d.confidence < com.dji.sdk.sample.internal.util
                     .DetectionConfig.UPLOAD_CONFIDENCE_THRESHOLD) continue;
-
-            if (!uploadedTrackIds.contains(d.trackId)) {
-                uploadedTrackIds.add(d.trackId);
-                uploadToFirebase(d, currentLat, currentLng, currentAlt);
+            count++;
+            if (d.confidence > bestConfidence) {
+                bestConfidence = d.confidence;
+                if (d.label != null) label = d.label;
             }
+        }
+        if (count == 0) return;
+
+        int newPeak = gridAggregator.recordCount(currentLat, currentLng, count);
+        if (newPeak > 0) {
+            uploadAggregatedCell(currentLat, currentLng, currentAlt,
+                    newPeak, bestConfidence, label);
         }
     }
 
-    private void uploadToFirebase(YoloDetector.Detection detection, double lat, double lng, double alt) {
+    /**
+     * One aggregated Firestore document per geo-grid cell (doc id = cell
+     * key), updated by merge only when the cell's peak count increases.
+     * Fields are ADDITIVE over the old schema so existing dashboard readers
+     * keep working: jumlahDeteksi now carries the peak count, and the
+     * timestamp string format is unchanged (Calendar Boundary parsing).
+     */
+    private void uploadAggregatedCell(double lat, double lng, double alt,
+                                      int peakCount, float confidence, String label) {
         if (db == null) return;
 
+        final String cellKey = gridAggregator.cellKey(lat, lng);
         Map<String, Object> data = new HashMap<>();
-
-        data.put("label", detection.label != null ? detection.label : "rubbish");
-        data.put("confidence", Math.round(detection.confidence * 100));
-        data.put("trackId", detection.trackId);
-        data.put("jumlahDeteksi", 1);
+        data.put("label", label);
+        data.put("confidence", Math.round(confidence * 100));
+        data.put("jumlahDeteksi", peakCount);           // dashboard-compatible
+        data.put("peakCount", peakCount);               // additive, explicit
+        data.put("cellKey", cellKey);                   // additive
         data.put("latitude", lat);
         data.put("longitude", lng);
         data.put("altitude", alt);
         data.put("timestamp", new SimpleDateFormat("MMMM dd, yyyy 'at' hh:mm:ss a z", Locale.US).format(new Date()));
+        data.put("timestampEpochMs", System.currentTimeMillis()); // additive
 
-        db.collection("waste_detections_v2").add(data)
+        db.collection("waste_detections_v2").document(cellKey)
+                .set(data, com.google.firebase.firestore.SetOptions.merge())
                 .addOnSuccessListener(ref -> mainHandler.post(() ->
-                        tvUploadStatus.setText("Sampah #" + detection.trackId + " Terekam")))
+                        tvUploadStatus.setText("Sel " + cellKey + " · " + peakCount + " Terekam")))
                 .addOnFailureListener(e -> mainHandler.post(() ->
-                        tvUploadStatus.setText("Gagal Upload")));
+                        tvUploadStatus.setText("Antri Offline / Gagal Upload")));
     }
 
     public void clearAllTracks() {
         mainHandler.post(() -> {
-            uploadedTrackIds.clear();
+            gridAggregator.reset();
             // Complete the reset: clear detector tracks + ID counter too (R3)
             BaseFpvView baseFpvView = findViewById(R.id.base_fpv_view);
             if (baseFpvView != null) baseFpvView.resetTracker();
