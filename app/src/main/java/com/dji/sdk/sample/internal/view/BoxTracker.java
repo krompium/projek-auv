@@ -36,6 +36,11 @@ public class BoxTracker {
     /** Exponential smoothing factor for velocity updates (0..1, higher = snappier). */
     private static final float VELOCITY_ALPHA = 0.5f;
 
+    /** Gate grows with time since the track's last update (normalized units / second). */
+    private static final float MAX_APPARENT_SPEED = 0.35f;
+    /** Upper bound for the time-scaled gate. */
+    private static final float MAX_MATCH_DISTANCE_CAP = 0.25f;
+
     /** Per-detection association result. */
     public static class Assignment {
         public final int trackId;
@@ -113,8 +118,14 @@ public class BoxTracker {
             float cy = (boxes.get(d)[1] + boxes.get(d)[3]) / 2f;
             for (int t = 0; t < tracks.size(); t++) {
                 Track tr = tracks.get(t);
-                float dist = (float) Math.hypot(cx - tr.cx, cy - tr.cy);
-                if (dist <= maxMatchDistance) {
+                float dtSec = Math.max(0f, (nowMs - tr.lastUpdateMs) / 1000f);
+                float gate = Math.min(MAX_MATCH_DISTANCE_CAP,
+                        Math.max(maxMatchDistance, MAX_APPARENT_SPEED * dtSec));
+                float distLast = (float) Math.hypot(cx - tr.cx, cy - tr.cy);
+                float distPred = (float) Math.hypot(
+                        cx - (tr.cx + tr.vx * dtSec), cy - (tr.cy + tr.vy * dtSec));
+                float dist = Math.min(distLast, distPred);
+                if (dist <= gate) {
                     pairs.add(new Pair(d, t, dist));
                 }
             }

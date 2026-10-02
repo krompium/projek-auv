@@ -28,7 +28,7 @@ import java.util.List;
 public class YoloDetector {
 
     private static final String TAG = "YoloDetector";
-    private static final String MODEL_FILE = "best_float16.tflite";
+    private static final String MODEL_FILE = "best.tflite";
     private static final String LABELS_FILE = "labels.txt";
 
     private static final int INPUT_SIZE = 640;
@@ -56,6 +56,8 @@ public class YoloDetector {
     private float outputScale;
     private int outputZeroPoint;
     private boolean isInt8 = false;
+    private Context appContext;
+    private int parseDiagCount = 0;
     private GpuDelegate gpuDelegate = null;
 
     public static class Detection {
@@ -77,6 +79,7 @@ public class YoloDetector {
 
     public YoloDetector(Context context) {
         try {
+            this.appContext = context.getApplicationContext();
             loadLabels(context);
             MappedByteBuffer modelBuffer = loadModelFile(context);
 
@@ -182,7 +185,12 @@ public class YoloDetector {
         int[] pixels = new int[INPUT_SIZE * INPUT_SIZE];
         bitmap.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE);
 
+        final boolean channelsFirst = tflite.getInputTensor(0).shape()[1] == 3;
+        final int plane = INPUT_SIZE * INPUT_SIZE;
+        int idx = -1;
+
         for (int pixel : pixels) {
+            idx++;
             int r = (pixel >> 16) & 0xFF;
             int g = (pixel >> 8)  & 0xFF;
             int b =  pixel        & 0xFF;
@@ -195,9 +203,15 @@ public class YoloDetector {
                 inputBuffer.put(QuantUtil.quantizeChannel(g, inputScale, inputZeroPoint));
                 inputBuffer.put(QuantUtil.quantizeChannel(b, inputScale, inputZeroPoint));
             } else {
-                inputBuffer.putFloat(r / 255.0f);
-                inputBuffer.putFloat(g / 255.0f);
-                inputBuffer.putFloat(b / 255.0f);
+                if (channelsFirst) {
+                    inputBuffer.putFloat(idx * 4, r / 255.0f);
+                    inputBuffer.putFloat((plane + idx) * 4, g / 255.0f);
+                    inputBuffer.putFloat((2 * plane + idx) * 4, b / 255.0f);
+                } else {
+                    inputBuffer.putFloat(r / 255.0f);
+                    inputBuffer.putFloat(g / 255.0f);
+                    inputBuffer.putFloat(b / 255.0f);
+                }
             }
         }
     }
@@ -253,6 +267,12 @@ public class YoloDetector {
 
         } catch (Exception e) {
             Log.e(TAG, "Inference error", e);
+            final String errMsg = e.getClass().getSimpleName() + ": " + e.getMessage();
+            if (appContext != null) {
+                new android.os.Handler(android.os.Looper.getMainLooper()).post(() ->
+                        android.widget.Toast.makeText(appContext, "Detect error: " + errMsg,
+                                android.widget.Toast.LENGTH_LONG).show());
+            }
         }
 
         return results;
@@ -260,6 +280,9 @@ public class YoloDetector {
 
     private List<Detection> parseOutput(float[][] output, int numClasses, Letterbox lb) {
         List<Detection> detections = new ArrayList<>();
+        float globalMaxScore = 0f;
+        int passedConfidence = 0;
+        int rejectedByPadding = 0;
 
         for (int i = 0; i < MAX_DETECTIONS; i++) {
             float maxScore = 0;
@@ -272,25 +295,42 @@ public class YoloDetector {
                     bestClass = c;
                 }
             }
+            if (maxScore > globalMaxScore) globalMaxScore = maxScore;
 
             if (maxScore < CONFIDENCE_THRESHOLD || bestClass < 0) continue;
+            passedConfidence++;
 
             float cx = output[0][i];
             float cy = output[1][i];
             float w  = output[2][i];
             float h  = output[3][i];
 
-            // Box in model-input (letterboxed) normalized coords, then
-            // inverse-mapped to source-frame normalized coords (clamped).
             float[] box = new float[]{
                     cx - w / 2f, cy - h / 2f, cx + w / 2f, cy + h / 2f};
             lb.inverseMapNormalized(box);
-            if (box[2] <= box[0] || box[3] <= box[1]) continue; // fully in padding
+            if (box[2] <= box[0] || box[3] <= box[1]) {
+                rejectedByPadding++;
+                continue;
+            }
 
             String label = (bestClass < labels.size()) ?
                     labels.get(bestClass) : "unknown";
             detections.add(new Detection(
                     new RectF(box[0], box[1], box[2], box[3]), label, maxScore));
+        }
+
+        parseDiagCount++;
+        if (parseDiagCount % 10 == 0 && appContext != null) {
+            final float fMaxScore = globalMaxScore;
+            final int fPassed = passedConfidence;
+            final int fRejected = rejectedByPadding;
+            final String lbInfo = "padX=" + lb.padX + " padY=" + lb.padY
+                    + " cw=" + lb.contentWidth + " ch=" + lb.contentHeight;
+            new android.os.Handler(android.os.Looper.getMainLooper()).post(() ->
+                    android.widget.Toast.makeText(appContext,
+                            "MaxScore=" + fMaxScore + " LolosConf=" + fPassed
+                                    + " DitolakPadding=" + fRejected + " | " + lbInfo,
+                            android.widget.Toast.LENGTH_LONG).show());
         }
 
         return applyNMS(detections);

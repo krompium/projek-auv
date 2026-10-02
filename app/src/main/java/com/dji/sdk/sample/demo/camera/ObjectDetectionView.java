@@ -65,6 +65,14 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView,
 
     // GPS state
     private double currentLat = 0, currentLng = 0, currentAlt = 0;
+    // --- Skema Pengujian Deteksi (field test data collection) ---
+    private boolean isTestSessionActive = false;
+    private String testScenario = "";
+    private int testGroundTruthCount = 0;
+    private String testLightCondition = "";
+    private double testAltitudeM = 0;
+    private final java.util.List<Map<String, Object>> testRawDetections = new java.util.ArrayList<>();
+    private final Map<String, Integer> testCellPeaks = new HashMap<>();
     private int currentSatelliteCount = 0;
 
     public ObjectDetectionView(Context context) {
@@ -81,6 +89,14 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView,
         LayoutInflater.from(context).inflate(R.layout.view_object_detection, this, true);
 
         tvUploadStatus = findViewById(R.id.tv_upload_status);
+
+        tvUploadStatus.setOnClickListener(v -> {
+            if (isTestSessionActive) {
+                endTestSession();
+            } else {
+                startTestSession();
+            }
+        });
 
         // Map setup
         mapView = findViewById(R.id.map_view);
@@ -169,6 +185,13 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView,
             if (d.confidence < com.dji.sdk.sample.internal.util
                     .DetectionConfig.UPLOAD_CONFIDENCE_THRESHOLD) continue;
             count++;
+            if (isTestSessionActive) {
+                Map<String, Object> raw = new HashMap<>();
+                raw.put("confidence", (double) d.confidence);
+                raw.put("timestamp", System.currentTimeMillis());
+                raw.put("trackId", d.trackId);
+                testRawDetections.add(raw);
+            }
             if (d.confidence > bestConfidence) {
                 bestConfidence = d.confidence;
                 if (d.label != null) label = d.label;
@@ -177,6 +200,13 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView,
         if (count == 0) return;
 
         int newPeak = gridAggregator.recordCount(currentLat, currentLng, count);
+        if (isTestSessionActive) {
+            String testKey = gridAggregator.cellKey(currentLat, currentLng);
+            Integer prevTestPeak = testCellPeaks.get(testKey);
+            if (prevTestPeak == null || count > prevTestPeak) {
+                testCellPeaks.put(testKey, count);
+            }
+        }
         if (newPeak > 0) {
             uploadAggregatedCell(currentLat, currentLng, currentAlt,
                     newPeak, bestConfidence, label);
@@ -224,6 +254,100 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView,
             tvUploadStatus.setText("Memori Tracker Direset");
         });
     }
+
+    private void startTestSession() {
+        Context ctx = getContext();
+        android.widget.LinearLayout layout = new android.widget.LinearLayout(ctx);
+        layout.setOrientation(android.widget.LinearLayout.VERTICAL);
+        layout.setPadding(40, 20, 40, 20);
+
+        final android.widget.EditText inputSkenario = new android.widget.EditText(ctx);
+        inputSkenario.setHint("Skenario (contoh: 1, 2, 3, 4)");
+        layout.addView(inputSkenario);
+
+        final android.widget.EditText inputGroundTruth = new android.widget.EditText(ctx);
+        inputGroundTruth.setHint("Jumlah sampah riil (ground truth)");
+        inputGroundTruth.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        layout.addView(inputGroundTruth);
+
+        final android.widget.EditText inputCahaya = new android.widget.EditText(ctx);
+        inputCahaya.setHint("Kondisi cahaya (contoh: terang, mendung)");
+        layout.addView(inputCahaya);
+
+        final android.widget.EditText inputKetinggian = new android.widget.EditText(ctx);
+        inputKetinggian.setHint("Ketinggian terbang (meter)");
+        inputKetinggian.setInputType(android.text.InputType.TYPE_CLASS_NUMBER
+                | android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        layout.addView(inputKetinggian);
+
+        new android.app.AlertDialog.Builder(ctx)
+                .setTitle("Mulai Sesi Pengujian")
+                .setView(layout)
+                .setPositiveButton("Mulai", (d, w) -> {
+                    testScenario = inputSkenario.getText().toString();
+                    testLightCondition = inputCahaya.getText().toString();
+                    try {
+                        testGroundTruthCount = Integer.parseInt(inputGroundTruth.getText().toString());
+                    } catch (NumberFormatException e) {
+                        testGroundTruthCount = 0;
+                    }
+                    try {
+                        testAltitudeM = Double.parseDouble(inputKetinggian.getText().toString());
+                    } catch (NumberFormatException e) {
+                        testAltitudeM = 0;
+                    }
+                    gridAggregator.reset();
+                    testRawDetections.clear();
+                    testCellPeaks.clear();
+                    isTestSessionActive = true;
+                    tvUploadStatus.setText("Sesi Uji AKTIF: " + testScenario);
+                })
+                .setNegativeButton("Batal", null)
+                .show();
+    }
+
+    private void endTestSession() {
+        isTestSessionActive = false;
+
+        if (db == null) {
+            tvUploadStatus.setText("Sesi Uji selesai (Firebase tidak tersedia)");
+            return;
+        }
+
+        int detectedCountSum = 0;
+        for (int peak : testCellPeaks.values()) {
+            detectedCountSum += peak;
+        }
+        final int detectedCount = detectedCountSum;
+        String cellKey = gridAggregator.cellKey(currentLat, currentLng);
+
+        float confidenceSum = 0f;
+        for (Map<String, Object> d : testRawDetections) {
+            confidenceSum += ((Number) d.get("confidence")).floatValue();
+        }
+        float avgConfidence = testRawDetections.isEmpty() ? 0f : confidenceSum / testRawDetections.size();
+
+        Map<String, Object> data = new HashMap<>();
+        data.put("skenario", testScenario);
+        data.put("ground_truth_count", testGroundTruthCount);
+        data.put("kondisi_cahaya", testLightCondition);
+        data.put("ketinggian_m", testAltitudeM);
+        data.put("detected_count", detectedCount);
+        data.put("avg_confidence", avgConfidence);
+        data.put("cellKey", cellKey);
+        data.put("latitude", currentLat);
+        data.put("longitude", currentLng);
+        data.put("timestamp", new SimpleDateFormat("MMMM dd, yyyy 'at' hh:mm:ss a z", Locale.US).format(new Date()));
+        data.put("raw_detections", new java.util.ArrayList<>(testRawDetections));
+
+        db.collection("pengujian_deteksi").add(data)
+                .addOnSuccessListener(ref -> mainHandler.post(() ->
+                        tvUploadStatus.setText("Sesi Uji Tersimpan: " + detectedCount + " terdeteksi")))
+                .addOnFailureListener(e -> mainHandler.post(() ->
+                        tvUploadStatus.setText("Gagal Simpan Sesi Uji")));
+    }
+
+
 
     private void startTelemetry() {
         BaseProduct product = DJISampleApplication.getProductInstance();

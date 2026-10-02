@@ -24,7 +24,7 @@ public final class DetectionConfig {
      * threshold from the U6/parity_check sweep once the harness has run on
      * the real test split.
      */
-    public static final float CONFIDENCE_THRESHOLD = 0.35f;
+    public static final float CONFIDENCE_THRESHOLD = 0.38f;
 
     /** NMS IoU threshold (unchanged; standard YOLOv8 export convention). */
     public static final float IOU_THRESHOLD = 0.45f;
