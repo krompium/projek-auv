@@ -31,19 +31,43 @@ public class YoloDetector {
     private static final String MODEL_FILE = "best.tflite";
     private static final String LABELS_FILE = "labels.txt";
 
-    private static final int INPUT_SIZE = 640;
-    private final BoxTracker tracker = new BoxTracker();
-    private static final int MAX_DETECTIONS = 8400;
-    // Centralized in DetectionConfig (U7): one tunable, calibrated via the
-    // U6 harness sweep, instead of magic numbers scattered across files.
+    private static final int DEFAULT_INPUT_SIZE = 640;
+    private static final int DEFAULT_MAX_DETECTIONS = 8400;
+
+    // Gate 0.15f prevents track-ID churn (39 IDs) during camera motion at ~3.1 FPS
+    private final BoxTracker tracker = new BoxTracker(0.15f);
+
+    // Centralized in DetectionConfig (U7)
     private static final float CONFIDENCE_THRESHOLD =
             com.dji.sdk.sample.internal.util.DetectionConfig.CONFIDENCE_THRESHOLD;
     private static final float IOU_THRESHOLD =
             com.dji.sdk.sample.internal.util.DetectionConfig.IOU_THRESHOLD;
 
+    // Exact 256-entry LUT for c / 255.0f
+    private static final float[] FLOAT_LUT = new float[256];
+    static {
+        for (int i = 0; i < 256; i++) {
+            FLOAT_LUT[i] = i / 255.0f;
+        }
+    }
+
     private Interpreter tflite;
-    private List<String> labels = new ArrayList<>();
+    private final List<String> labels = new ArrayList<>();
     private ByteBuffer inputBuffer;
+
+    // Dynamically detected tensor dimensions (supports imgsz=640, 800, etc.)
+    private int inputSize = DEFAULT_INPUT_SIZE;
+    private int numDetections = DEFAULT_MAX_DETECTIONS;
+    private boolean channelsFirst = false;
+
+    // Pre-allocated buffers to eliminate ~1.8 MB per-frame GC allocation
+    private int[] pixelBuffer;
+    private float[][][] outputBuffer;
+    private byte[][][] rawOutputBuffer;
+    private final Rect srcRect = new Rect();
+    private final Rect dstRect = new Rect();
+    private final byte[] int8InputLut = new byte[256];
+    private final float[] int8OutputLut = new float[256];
 
     // Reused letterbox target (allocation kept off the hot path)
     private Bitmap letterboxBitmap;
@@ -56,8 +80,9 @@ public class YoloDetector {
     private float outputScale;
     private int outputZeroPoint;
     private boolean isInt8 = false;
+    private long lastErrorToastMs = 0;
+    private volatile String initError = null;
     private Context appContext;
-    private int parseDiagCount = 0;
     private GpuDelegate gpuDelegate = null;
 
     public static class Detection {
@@ -67,8 +92,10 @@ public class YoloDetector {
         public int trackId;
         /** Track velocity in normalized units/second (for overlay prediction). */
         public float velocityX, velocityY;
-        /** Wall-clock time (ms) this detection was produced. */
+        /** Wall-clock time (ms) the video frame was captured. */
         public long timestampMs;
+        /** Wall-clock time (ms) inference completed and delivered this detection. */
+        public long deliveryTimestampMs;
 
         public Detection(RectF boundingBox, String label, float confidence) {
             this.boundingBox = boundingBox;
@@ -90,30 +117,39 @@ public class YoloDetector {
                     GpuDelegate.Options delegateOptions = compatList.getBestOptionsForThisDevice();
                     gpuDelegate = new GpuDelegate(delegateOptions);
                     options.addDelegate(gpuDelegate);
-                    new android.os.Handler(android.os.Looper.getMainLooper()).post(() ->
-                            android.widget.Toast.makeText(context,
-                                    "GPU Delegate: Active", android.widget.Toast.LENGTH_LONG).show());
                 } else {
                     options.setNumThreads(4);
                     new android.os.Handler(android.os.Looper.getMainLooper()).post(() ->
                             android.widget.Toast.makeText(context,
-                                    "GPU not supported — CPU fallback (4 threads)", android.widget.Toast.LENGTH_LONG).show());
+                                    "GPU not supported — CPU fallback (4 threads)",
+                                    android.widget.Toast.LENGTH_LONG).show());
                 }
             }
 
             tflite = new Interpreter(modelBuffer, options);
 
-            // Fail loudly on model/label mismatch (R4): a silent mismatch
-            // corrupts parseOutput's class-score indexing.
-            int[] outShape = tflite.getOutputTensor(0).shape(); // [1, 4+C, 8400]
+            // Detect input spatial size & channel layout dynamically
+            int[] inShape = tflite.getInputTensor(0).shape();
+            if (inShape.length == 4) {
+                channelsFirst = (inShape[1] == 3);
+                inputSize = channelsFirst ? inShape[2] : inShape[1];
+            } else {
+                channelsFirst = false;
+                inputSize = DEFAULT_INPUT_SIZE;
+            }
+            pixelBuffer = new int[inputSize * inputSize];
+
+            // Fail loudly on model/label mismatch (R4)
+            int[] outShape = tflite.getOutputTensor(0).shape(); // [1, 4+C, N]
             int modelClasses = (outShape.length >= 2) ? outShape[1] - 4 : -1;
             if (modelClasses != labels.size()) {
                 String msg = "Model/label mismatch: model outputs " + modelClasses
                         + " class(es), labels.txt has " + labels.size();
-                tflite.close();
-                tflite = null;
+                close();
                 throw new IllegalStateException(msg);
             }
+            numDetections = (outShape.length >= 3) ? outShape[2] : DEFAULT_MAX_DETECTIONS;
+            outputBuffer = new float[1][4 + labels.size()][numDetections];
 
             // Detect if model is int8 quantized
             org.tensorflow.lite.DataType inputType =
@@ -129,146 +165,149 @@ public class YoloDetector {
                 outputScale     = tflite.getOutputTensor(0).quantizationParams().getScale();
                 outputZeroPoint = tflite.getOutputTensor(0).quantizationParams().getZeroPoint();
 
-                // int8: 1 byte per pixel
-                inputBuffer = ByteBuffer.allocateDirect(1 * INPUT_SIZE * INPUT_SIZE * 3);
+                for (int v = 0; v < 256; v++) {
+                    int8InputLut[v] = QuantUtil.quantizeChannel(v, inputScale, inputZeroPoint);
+                    int signedByte = (byte) v;
+                    int8OutputLut[v] = (signedByte - outputZeroPoint) * outputScale;
+                }
+                rawOutputBuffer = new byte[1][4 + labels.size()][numDetections];
+
+                // int8: 1 byte per pixel channel
+                inputBuffer = ByteBuffer.allocateDirect(1 * inputSize * inputSize * 3);
                 Log.d(TAG, "int8 model detected. inputScale=" + inputScale
                         + " inputZP=" + inputZeroPoint
                         + " outputScale=" + outputScale
                         + " outputZP=" + outputZeroPoint);
             } else {
                 isInt8 = false;
-                // float32: 4 bytes per pixel
-                inputBuffer = ByteBuffer.allocateDirect(1 * INPUT_SIZE * INPUT_SIZE * 3 * 4);
+                // float32: 4 bytes per pixel channel
+                inputBuffer = ByteBuffer.allocateDirect(1 * inputSize * inputSize * 3 * 4);
                 Log.d(TAG, "float32 model detected");
             }
 
             inputBuffer.order(ByteOrder.nativeOrder());
-            Log.d(TAG, "YoloDetector initialized. Classes=" + labels.size()
-                    + " isInt8=" + isInt8);
+            Log.d(TAG, "YoloDetector initialized. " + getModelInfo());
 
         } catch (Exception e) {
             Log.e(TAG, "Failed to initialize YoloDetector", e);
             final String err = e.getMessage();
-            new android.os.Handler(android.os.Looper.getMainLooper()).post(() ->
-                    android.widget.Toast.makeText(context,
-                            "YOLO init error: " + err,
-                            android.widget.Toast.LENGTH_LONG).show());
+            initError = (err != null) ? err : e.getClass().getSimpleName();
         }
     }
 
     private void loadLabels(Context context) throws IOException {
-        BufferedReader reader = new BufferedReader(
-                new InputStreamReader(context.getAssets().open(LABELS_FILE)));
-        String line;
-        while ((line = reader.readLine()) != null) {
-            if (!line.trim().isEmpty()) {
-                labels.add(line.trim());
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(context.getAssets().open(LABELS_FILE)))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (!line.trim().isEmpty()) {
+                    labels.add(line.trim());
+                }
             }
         }
-        reader.close();
         Log.d(TAG, "Loaded " + labels.size() + " labels: " + labels.toString());
     }
 
     private MappedByteBuffer loadModelFile(Context context) throws IOException {
-        android.content.res.AssetFileDescriptor fileDescriptor =
-                context.getAssets().openFd(MODEL_FILE);
-        FileInputStream inputStream =
-                new FileInputStream(fileDescriptor.getFileDescriptor());
-        FileChannel fileChannel = inputStream.getChannel();
-        long startOffset = fileDescriptor.getStartOffset();
-        long declaredLength = fileDescriptor.getDeclaredLength();
-        return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength);
+        try (android.content.res.AssetFileDescriptor fileDescriptor =
+                     context.getAssets().openFd(MODEL_FILE);
+             FileInputStream inputStream =
+                     new FileInputStream(fileDescriptor.getFileDescriptor());
+             FileChannel fileChannel = inputStream.getChannel()) {
+            long startOffset = fileDescriptor.getStartOffset();
+            long declaredLength = fileDescriptor.getDeclaredLength();
+            return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength);
+        }
     }
 
     private void bitmapToInputBuffer(Bitmap bitmap) {
         inputBuffer.rewind();
-        int[] pixels = new int[INPUT_SIZE * INPUT_SIZE];
-        bitmap.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE);
+        bitmap.getPixels(pixelBuffer, 0, inputSize, 0, 0, inputSize, inputSize);
 
-        final boolean channelsFirst = tflite.getInputTensor(0).shape()[1] == 3;
-        final int plane = INPUT_SIZE * INPUT_SIZE;
-        int idx = -1;
+        final int plane = inputSize * inputSize;
 
-        for (int pixel : pixels) {
-            idx++;
-            int r = (pixel >> 16) & 0xFF;
-            int g = (pixel >> 8)  & 0xFF;
-            int b =  pixel        & 0xFF;
-
-            if (isInt8) {
-                // Correct affine quantization: round((c/255)/scale) + zeroPoint.
-                // The old code wrote (byte)(c + zeroPoint), which is wrong for
-                // any real scale and broke the int8 path (R4).
-                inputBuffer.put(QuantUtil.quantizeChannel(r, inputScale, inputZeroPoint));
-                inputBuffer.put(QuantUtil.quantizeChannel(g, inputScale, inputZeroPoint));
-                inputBuffer.put(QuantUtil.quantizeChannel(b, inputScale, inputZeroPoint));
-            } else {
-                if (channelsFirst) {
-                    inputBuffer.putFloat(idx * 4, r / 255.0f);
-                    inputBuffer.putFloat((plane + idx) * 4, g / 255.0f);
-                    inputBuffer.putFloat((2 * plane + idx) * 4, b / 255.0f);
-                } else {
-                    inputBuffer.putFloat(r / 255.0f);
-                    inputBuffer.putFloat(g / 255.0f);
-                    inputBuffer.putFloat(b / 255.0f);
-                }
+        if (isInt8) {
+            final byte[] lut = int8InputLut;
+            for (int i = 0; i < plane; i++) {
+                int pixel = pixelBuffer[i];
+                inputBuffer.put(lut[(pixel >> 16) & 0xFF]);
+                inputBuffer.put(lut[(pixel >> 8)  & 0xFF]);
+                inputBuffer.put(lut[ pixel        & 0xFF]);
+            }
+        } else if (channelsFirst) {
+            final float[] lut = FLOAT_LUT;
+            for (int i = 0; i < plane; i++) {
+                int pixel = pixelBuffer[i];
+                inputBuffer.putFloat(i * 4,               lut[(pixel >> 16) & 0xFF]);
+                inputBuffer.putFloat((plane + i) * 4,     lut[(pixel >> 8)  & 0xFF]);
+                inputBuffer.putFloat((2 * plane + i) * 4, lut[ pixel        & 0xFF]);
+            }
+        } else {
+            final float[] lut = FLOAT_LUT;
+            for (int i = 0; i < plane; i++) {
+                int pixel = pixelBuffer[i];
+                inputBuffer.putFloat(lut[(pixel >> 16) & 0xFF]);
+                inputBuffer.putFloat(lut[(pixel >> 8)  & 0xFF]);
+                inputBuffer.putFloat(lut[ pixel        & 0xFF]);
             }
         }
     }
 
     public List<Detection> detect(Bitmap bitmap) {
+        return detect(bitmap, System.currentTimeMillis());
+    }
+
+    public List<Detection> detect(Bitmap bitmap, long captureTimestampMs) {
         List<Detection> results = new ArrayList<>();
         if (tflite == null || bitmap == null) return results;
 
         try {
             // Aspect-preserving letterbox to the square model input (R2).
-            // getBitmap(640, 640) used to squash 16:9 into a square, which is
-            // distorted relative to YOLOv8's letterboxed training input.
             Letterbox lb = Letterbox.compute(
-                    bitmap.getWidth(), bitmap.getHeight(), INPUT_SIZE);
+                    bitmap.getWidth(), bitmap.getHeight(), inputSize);
             Bitmap modelInput;
-            if (lb.isIdentity() && bitmap.getWidth() == INPUT_SIZE) {
+            if (lb.isIdentity() && bitmap.getWidth() == inputSize) {
                 modelInput = bitmap;
             } else {
                 if (letterboxBitmap == null) {
                     letterboxBitmap = Bitmap.createBitmap(
-                            INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ARGB_8888);
+                            inputSize, inputSize, Bitmap.Config.ARGB_8888);
                     letterboxCanvas = new Canvas(letterboxBitmap);
                 }
                 letterboxCanvas.drawColor(PAD_COLOR);
-                letterboxCanvas.drawBitmap(bitmap,
-                        new Rect(0, 0, bitmap.getWidth(), bitmap.getHeight()),
-                        new Rect(lb.padX, lb.padY,
-                                lb.padX + lb.contentWidth, lb.padY + lb.contentHeight),
-                        null);
+                srcRect.set(0, 0, bitmap.getWidth(), bitmap.getHeight());
+                dstRect.set(lb.padX, lb.padY,
+                        lb.padX + lb.contentWidth, lb.padY + lb.contentHeight);
+                letterboxCanvas.drawBitmap(bitmap, srcRect, dstRect, null);
                 modelInput = letterboxBitmap;
             }
 
             bitmapToInputBuffer(modelInput);
 
             int numClasses = labels.size();
-            float[][][] output = new float[1][4 + numClasses][MAX_DETECTIONS];
 
             if (isInt8) {
-                byte[][][] rawOutput = new byte[1][4 + numClasses][MAX_DETECTIONS];
-                tflite.run(inputBuffer, rawOutput);
-
+                tflite.run(inputBuffer, rawOutputBuffer);
+                final float[] outLut = int8OutputLut;
                 for (int row = 0; row < 4 + numClasses; row++) {
-                    for (int col = 0; col < MAX_DETECTIONS; col++) {
-                        output[0][row][col] =
-                                (rawOutput[0][row][col] - outputZeroPoint) * outputScale;
+                    byte[] rawRow = rawOutputBuffer[0][row];
+                    float[] outRow = outputBuffer[0][row];
+                    for (int col = 0; col < numDetections; col++) {
+                        outRow[col] = outLut[rawRow[col] & 0xFF];
                     }
                 }
             } else {
-                tflite.run(inputBuffer, output);
+                tflite.run(inputBuffer, outputBuffer);
             }
 
-            results = parseOutput(output[0], numClasses, lb);
+            results = parseOutput(outputBuffer[0], numClasses, lb, captureTimestampMs);
 
         } catch (Exception e) {
             Log.e(TAG, "Inference error", e);
             final String errMsg = e.getClass().getSimpleName() + ": " + e.getMessage();
-            if (appContext != null) {
+            long nowErr = System.currentTimeMillis();
+            if (appContext != null && nowErr - lastErrorToastMs > 10_000) {
+                lastErrorToastMs = nowErr;
                 new android.os.Handler(android.os.Looper.getMainLooper()).post(() ->
                         android.widget.Toast.makeText(appContext, "Detect error: " + errMsg,
                                 android.widget.Toast.LENGTH_LONG).show());
@@ -278,13 +317,11 @@ public class YoloDetector {
         return results;
     }
 
-    private List<Detection> parseOutput(float[][] output, int numClasses, Letterbox lb) {
+    private List<Detection> parseOutput(float[][] output, int numClasses,
+                                        Letterbox lb, long captureTimestampMs) {
         List<Detection> detections = new ArrayList<>();
-        float globalMaxScore = 0f;
-        int passedConfidence = 0;
-        int rejectedByPadding = 0;
 
-        for (int i = 0; i < MAX_DETECTIONS; i++) {
+        for (int i = 0; i < numDetections; i++) {
             float maxScore = 0;
             int bestClass = -1;
 
@@ -295,10 +332,7 @@ public class YoloDetector {
                     bestClass = c;
                 }
             }
-            if (maxScore > globalMaxScore) globalMaxScore = maxScore;
-
             if (maxScore < CONFIDENCE_THRESHOLD || bestClass < 0) continue;
-            passedConfidence++;
 
             float cx = output[0][i];
             float cy = output[1][i];
@@ -307,11 +341,14 @@ public class YoloDetector {
 
             float[] box = new float[]{
                     cx - w / 2f, cy - h / 2f, cx + w / 2f, cy + h / 2f};
-            lb.inverseMapNormalized(box);
-            if (box[2] <= box[0] || box[3] <= box[1]) {
-                rejectedByPadding++;
-                continue;
+            if (Math.max(box[2], box[3]) > 2.0f) {
+                box[0] /= inputSize;
+                box[1] /= inputSize;
+                box[2] /= inputSize;
+                box[3] /= inputSize;
             }
+            lb.inverseMapNormalized(box);
+            if (box[2] <= box[0] || box[3] <= box[1]) continue;
 
             String label = (bestClass < labels.size()) ?
                     labels.get(bestClass) : "unknown";
@@ -319,24 +356,10 @@ public class YoloDetector {
                     new RectF(box[0], box[1], box[2], box[3]), label, maxScore));
         }
 
-        parseDiagCount++;
-        if (parseDiagCount % 10 == 0 && appContext != null) {
-            final float fMaxScore = globalMaxScore;
-            final int fPassed = passedConfidence;
-            final int fRejected = rejectedByPadding;
-            final String lbInfo = "padX=" + lb.padX + " padY=" + lb.padY
-                    + " cw=" + lb.contentWidth + " ch=" + lb.contentHeight;
-            new android.os.Handler(android.os.Looper.getMainLooper()).post(() ->
-                    android.widget.Toast.makeText(appContext,
-                            "MaxScore=" + fMaxScore + " LolosConf=" + fPassed
-                                    + " DitolakPadding=" + fRejected + " | " + lbInfo,
-                            android.widget.Toast.LENGTH_LONG).show());
-        }
-
-        return applyNMS(detections);
+        return applyNMS(detections, captureTimestampMs);
     }
 
-    private List<Detection> applyNMS(List<Detection> detections) {
+    private List<Detection> applyNMS(List<Detection> detections, long captureTimestampMs) {
         detections.sort((a, b) -> Float.compare(b.confidence, a.confidence));
 
         List<Detection> result = new ArrayList<>();
@@ -354,7 +377,7 @@ public class YoloDetector {
                 }
             }
         }
-        assignTrackIds(result);
+        assignTrackIds(result, captureTimestampMs);
 
         return result;
     }
@@ -374,7 +397,7 @@ public class YoloDetector {
         return interArea / (aArea + bArea - interArea);
     }
 
-    public void close() {
+    public synchronized void close() {
         if (tflite != null) {
             tflite.close();
             tflite = null;
@@ -390,14 +413,9 @@ public class YoloDetector {
         }
     }
 
-    /**
-     * Associates detections with tracks via {@link BoxTracker}, entirely in
-     * normalized [0,1] coordinates. (The old implementation compared
-     * normalized centers against a 150-pixel threshold, which could never
-     * reject a match — the root cause of the unstable track IDs.)
-     */
-    private void assignTrackIds(List<Detection> currentDetections) {
-        long nowMs = System.currentTimeMillis();
+    private void assignTrackIds(List<Detection> currentDetections, long captureTimestampMs) {
+        long deliveryMs = System.currentTimeMillis();
+        long trackTimeMs = (captureTimestampMs > 0) ? captureTimestampMs : deliveryMs;
         List<float[]> boxes = new ArrayList<>(currentDetections.size());
         for (Detection d : currentDetections) {
             boxes.add(new float[]{
@@ -405,37 +423,45 @@ public class YoloDetector {
                     d.boundingBox.right, d.boundingBox.bottom});
         }
 
-        List<BoxTracker.Assignment> assignments = tracker.assign(boxes, nowMs);
+        List<BoxTracker.Assignment> assignments = tracker.assign(boxes, trackTimeMs);
         for (int i = 0; i < currentDetections.size(); i++) {
             Detection d = currentDetections.get(i);
             BoxTracker.Assignment a = assignments.get(i);
             d.trackId = a.trackId;
             d.velocityX = a.vx;
             d.velocityY = a.vy;
-            d.timestampMs = nowMs;
+            d.timestampMs = trackTimeMs;
+            d.deliveryTimestampMs = deliveryMs;
         }
     }
 
-    /**
-     * Full tracker reset: clears all tracks AND the ID counter, so the next
-     * detection starts at trackId 1. (clearAllTracks() used to clear only the
-     * uploaded-ID set, leaking tracker state across sessions — R3.)
-     */
     public void reset() {
         tracker.reset();
     }
 
-    /** Number of currently tracked objects (for metrics/overlay). */
     public int getActiveTrackCount() {
         return tracker.getActiveCount();
     }
 
-    /** Total track IDs ever assigned in this session (for metrics/overlay). */
     public int getTotalTrackIdCount() {
         return tracker.getTotalCreated();
     }
 
-    /** Whether the GPU delegate is active (for metrics). */
+    public boolean isReady() {
+        return tflite != null && initError == null;
+    }
+
+    public String getInitError() {
+        return initError;
+    }
+
+    public String getModelInfo() {
+        if (tflite == null) return "not loaded";
+        return "in=" + java.util.Arrays.toString(tflite.getInputTensor(0).shape())
+                + " out=" + java.util.Arrays.toString(tflite.getOutputTensor(0).shape())
+                + " classes=" + labels.size() + " gpu=" + (gpuDelegate != null);
+    }
+
     public boolean isGpuActive() {
         return gpuDelegate != null;
     }

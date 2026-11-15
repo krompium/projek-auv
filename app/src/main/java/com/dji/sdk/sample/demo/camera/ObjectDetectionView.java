@@ -5,7 +5,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.location.LocationManager;
-import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
@@ -64,7 +63,7 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView,
             new com.dji.sdk.sample.internal.util.GeoGridAggregator();
 
     // GPS state
-    private double currentLat = 0, currentLng = 0, currentAlt = 0;
+    private volatile double currentLat = 0, currentLng = 0, currentAlt = 0;
     // --- Skema Pengujian Deteksi (field test data collection) ---
     private boolean isTestSessionActive = false;
     private String testScenario = "";
@@ -72,13 +71,17 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView,
     private String testLightCondition = "";
     private double testAltitudeM = 0;
     private final java.util.List<Map<String, Object>> testRawDetections = new java.util.ArrayList<>();
-    private final Map<String, Integer> testCellPeaks = new HashMap<>();
-    private int currentSatelliteCount = 0;
-
     public ObjectDetectionView(Context context) {
         super(context);
         init(context);
     }
+
+    private final Map<String, Integer> testCellPeaks = new HashMap<>();
+    private volatile int currentSatelliteCount = 0;
+    private static final int MIN_SATELLITES = 6; // sesuai field-test-protocol
+    private long lastGpsWarnMs = 0;
+    private long lastMapCameraUpdateMs = 0;
+    private static final long MAP_CAMERA_UPDATE_INTERVAL_MS = 500;
 
     public ObjectDetectionView(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -114,17 +117,12 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView,
             }
         });
 
-        // Firebase — offline persistence ON so detections during signal loss
-        // queue locally and auto-sync on reconnect (R10).
+        // Firebase — persistensi offline sudah aktif default di Android (dok. resmi),
+        // jadi deteksi saat sinyal hilang antri lokal dan sinkron otomatis (R10).
         try {
             db = FirebaseFirestore.getInstance();
-            db.setFirestoreSettings(
-                    new com.google.firebase.firestore.FirebaseFirestoreSettings.Builder()
-                            .setPersistenceEnabled(true)
-                            .build());
         } catch (Exception e) {
-            try { db = FirebaseFirestore.getInstance(); }
-            catch (Exception e2) { db = null; }
+            db = null;
         }
 
         setupDetectionCallback();
@@ -174,6 +172,19 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView,
     private void tryUploadToFirebase(List<YoloDetector.Detection> detections) {
         if (Double.isNaN(currentLat) || Double.isNaN(currentLng)) return;
         if (currentLat == 0 && currentLng == 0) return;
+
+        // GPS quality gate: di bawah MIN_SATELLITES posisi tidak andal dan akan
+        // mencemari geo-grid. Tampilkan di layar (tidak ada Logcat di lapangan).
+        if (currentSatelliteCount < MIN_SATELLITES) {
+            long nowMs = System.currentTimeMillis();
+            if (nowMs - lastGpsWarnMs > 3000) {
+                lastGpsWarnMs = nowMs;
+                final int sats = currentSatelliteCount;
+                mainHandler.post(() -> tvUploadStatus.setText(
+                        "GPS lemah (" + sats + " sat) — upload ditahan"));
+            }
+            return;
+        }
 
         // Count qualifying detections in THIS cycle (simultaneous count),
         // then let the geo-grid decide whether the cell's peak increased.
@@ -343,8 +354,14 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView,
         db.collection("pengujian_deteksi").add(data)
                 .addOnSuccessListener(ref -> mainHandler.post(() ->
                         tvUploadStatus.setText("Sesi Uji Tersimpan: " + detectedCount + " terdeteksi")))
-                .addOnFailureListener(e -> mainHandler.post(() ->
-                        tvUploadStatus.setText("Gagal Simpan Sesi Uji")));
+                .addOnFailureListener(e -> mainHandler.post(() -> {
+                    tvUploadStatus.setText("Gagal Simpan Sesi Uji");
+                    new android.app.AlertDialog.Builder(getContext())
+                            .setTitle("Gagal Simpan Sesi Uji")
+                            .setMessage(String.valueOf(e))
+                            .setPositiveButton("OK", null)
+                            .show();
+                }));
     }
 
 
@@ -361,13 +378,17 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView,
             currentSatelliteCount = state.getSatelliteCount();
             if (!Double.isNaN(lat) && !Double.isNaN(lng) && lat != 0 && lng != 0) {
                 currentLat = lat; currentLng = lng; currentAlt = alt;
-                mainHandler.post(() -> {
-                    if (gMap != null && droneMarker != null) {
-                        LatLng point = new LatLng(lat, lng);
-                        droneMarker.setPosition(point);
-                        gMap.animateCamera(CameraUpdateFactory.newLatLng(point));
-                    }
-                });
+                long nowMs = System.currentTimeMillis();
+                if (nowMs - lastMapCameraUpdateMs >= MAP_CAMERA_UPDATE_INTERVAL_MS) {
+                    lastMapCameraUpdateMs = nowMs;
+                    mainHandler.post(() -> {
+                        if (gMap != null && droneMarker != null) {
+                            LatLng point = new LatLng(lat, lng);
+                            droneMarker.setPosition(point);
+                            gMap.animateCamera(CameraUpdateFactory.newLatLng(point));
+                        }
+                    });
+                }
             }
         });
     }

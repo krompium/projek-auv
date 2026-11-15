@@ -4,8 +4,8 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
-import android.graphics.RectF;
 import android.util.AttributeSet;
+import android.util.SparseArray;
 import android.view.View;
 
 import java.util.ArrayList;
@@ -28,7 +28,23 @@ public class OverlayView extends View {
             Color.parseColor("#5856D6")
     };
 
-    private List<YoloDetector.Detection> detections = new ArrayList<>();
+    private volatile List<YoloDetector.Detection> detections = new ArrayList<>();
+
+    // Zero-lag transition state per trackId: decays the snap-back jump over
+    // BLEND_DURATION_MS (110 ms) using cubic ease-out so there is 0 steady-state lag.
+    private static final float BLEND_DURATION_MS = 110f;
+    private static final float SIZE_SMOOTH_ALPHA = 0.40f;
+
+    private static final class TrackVisualState {
+        long lastCaptureTs = -1;
+        long blendStartMs = 0;
+        float resCx = 0f, resCy = 0f;
+        float smoothW = -1f, smoothH = -1f;
+        float lastDrawnCx = 0f, lastDrawnCy = 0f;
+        int seenCycles = 1;
+    }
+
+    private final SparseArray<TrackVisualState> trackStates = new SparseArray<>();
 
     // Compact one-line debug rollup (fed by BaseFpvView, replaces Toast spam)
     private final Paint debugPaint;
@@ -66,14 +82,46 @@ public class OverlayView extends View {
     }
 
     public void updateDetections(List<YoloDetector.Detection> newDetections) {
-        this.detections = newDetections;
-        postInvalidate();
+        if (newDetections != null && !newDetections.isEmpty()) {
+            // Merge: keep coasting tracks from previous cycle if they only missed 1 frame
+            long now = System.currentTimeMillis();
+            List<YoloDetector.Detection> merged = new ArrayList<>(newDetections);
+            for (YoloDetector.Detection oldDet : this.detections) {
+                if (oldDet.trackId <= 0) continue;
+                long refTs = (oldDet.deliveryTimestampMs > 0)
+                        ? oldDet.deliveryTimestampMs : oldDet.timestampMs;
+                if (now - refTs > 450) continue; // coast at most 1 missed cycle (~320 ms)
+                boolean stillPresent = false;
+                for (YoloDetector.Detection nd : newDetections) {
+                    if (nd.trackId == oldDet.trackId) {
+                        stillPresent = true;
+                        break;
+                    }
+                }
+                if (!stillPresent) merged.add(oldDet);
+            }
+            this.detections = merged;
+        } else {
+            // If 0 detections in this frame, keep active tracks coasting for up to 450 ms
+            // instead of blinking the screen blank immediately on a 1-frame miss.
+            long now = System.currentTimeMillis();
+            List<YoloDetector.Detection> surviving = new ArrayList<>();
+            for (YoloDetector.Detection oldDet : this.detections) {
+                long refTs = (oldDet.deliveryTimestampMs > 0)
+                        ? oldDet.deliveryTimestampMs : oldDet.timestampMs;
+                if (oldDet.trackId > 0 && (now - refTs) <= 450) {
+                    surviving.add(oldDet);
+                }
+            }
+            this.detections = surviving;
+        }
+        postInvalidateOnAnimation();
     }
 
     /** One-line live metrics rollup rendered at the top-left of the FPV. */
     public void setDebugInfo(String info) {
         this.debugInfo = info;
-        postInvalidate();
+        postInvalidateOnAnimation();
     }
 
     @Override
@@ -89,38 +137,96 @@ public class OverlayView extends View {
             canvas.drawText(dbg, pad, h + pad / 2, debugPaint);
         }
 
-        if (detections == null || detections.isEmpty()) return;
+        List<YoloDetector.Detection> currentDetections = this.detections;
+        if (currentDetections == null || currentDetections.isEmpty()) {
+            trackStates.clear();
+            return;
+        }
 
         float viewWidth  = getWidth();
         float viewHeight = getHeight();
         long now = System.currentTimeMillis();
         boolean anyAlive = false;
 
-        for (YoloDetector.Detection det : detections) {
+        for (YoloDetector.Detection det : currentDetections) {
             if (det.boundingBox == null) continue;
 
-            // Inter-frame prediction (U8, R7): advance the box along the
-            // track velocity between ~400 ms detection cycles; stop drawing
-            // stale tracks (ghost removal) after the extrapolation window.
-            long dtMs = (det.timestampMs > 0) ? (now - det.timestampMs) : 0;
-            if (BoxInterpolator.isExpired(dtMs)) continue;
+            // Expiration is checked against delivery time so boxes don't blink
+            // out while waiting for the next ~210 ms inference to complete.
+            long refExpiryTs = (det.deliveryTimestampMs > 0)
+                    ? det.deliveryTimestampMs : det.timestampMs;
+            long ageSinceDeliveryMs = (refExpiryTs > 0) ? (now - refExpiryTs) : 0;
+            if (BoxInterpolator.isExpired(ageSinceDeliveryMs)) {
+                if (det.trackId > 0) trackStates.remove(det.trackId);
+                continue;
+            }
             anyAlive = true;
+
+            // Position extrapolation compensates from actual frame capture time
+            long predictDtMs = (det.timestampMs > 0)
+                    ? (now - det.timestampMs) : ageSinceDeliveryMs;
             float[] p = BoxInterpolator.predict(
                     det.boundingBox.left, det.boundingBox.top,
                     det.boundingBox.right, det.boundingBox.bottom,
-                    det.velocityX, det.velocityY, dtMs);
-            RectF box = new RectF(p[0], p[1], p[2], p[3]);
+                    det.velocityX, det.velocityY, predictDtMs);
+
+            float predCx = (p[0] + p[2]) * 0.5f;
+            float predCy = (p[1] + p[3]) * 0.5f;
+            float rawW   = p[2] - p[0];
+            float rawH   = p[3] - p[1];
+
+            float drawLeft, drawTop, drawRight, drawBottom;
 
             if (det.trackId > 0) {
+                TrackVisualState st = trackStates.get(det.trackId);
+                if (st == null) {
+                    st = new TrackVisualState();
+                    st.lastCaptureTs = det.timestampMs;
+                    st.smoothW = rawW;
+                    st.smoothH = rawH;
+                    st.lastDrawnCx = predCx;
+                    st.lastDrawnCy = predCy;
+                    trackStates.put(det.trackId, st);
+                } else if (det.timestampMs != st.lastCaptureTs) {
+                    st.seenCycles++;
+                    st.resCx = st.lastDrawnCx - predCx;
+                    st.resCy = st.lastDrawnCy - predCy;
+                    st.blendStartMs = now;
+                    st.lastCaptureTs = det.timestampMs;
+                    st.smoothW += SIZE_SMOOTH_ALPHA * (rawW - st.smoothW);
+                    st.smoothH += SIZE_SMOOTH_ALPHA * (rawH - st.smoothH);
+                }
+
+                if (st.seenCycles < 2) continue;
+
+                float u = (now - st.blendStartMs) / BLEND_DURATION_MS;
+                float decay = (u >= 1f) ? 0f : (u <= 0f ? 1f : (1f - u) * (1f - u) * (1f - u));
+
+                float cx = predCx + st.resCx * decay;
+                float cy = predCy + st.resCy * decay;
+                st.lastDrawnCx = cx;
+                st.lastDrawnCy = cy;
+
+                float halfW = st.smoothW * 0.5f;
+                float halfH = st.smoothH * 0.5f;
+                drawLeft   = Math.max(0f, Math.min(1f - st.smoothW, cx - halfW));
+                drawTop    = Math.max(0f, Math.min(1f - st.smoothH, cy - halfH));
+                drawRight  = drawLeft + st.smoothW;
+                drawBottom = drawTop  + st.smoothH;
+
                 boxPaint.setColor(TRACK_COLORS[det.trackId % TRACK_COLORS.length]);
             } else {
+                drawLeft   = p[0];
+                drawTop    = p[1];
+                drawRight  = p[2];
+                drawBottom = p[3];
                 boxPaint.setColor(Color.parseColor("#FF3B30"));
             }
 
-            float left   = box.left   * viewWidth;
-            float top    = box.top    * viewHeight;
-            float right  = box.right  * viewWidth;
-            float bottom = box.bottom * viewHeight;
+            float left   = drawLeft   * viewWidth;
+            float top    = drawTop    * viewHeight;
+            float right  = drawRight  * viewWidth;
+            float bottom = drawBottom * viewHeight;
 
             canvas.drawRect(left, top, right, bottom, boxPaint);
 
@@ -128,9 +234,11 @@ public class OverlayView extends View {
             int confidencePercent = Math.round(det.confidence * 100);
 
             if (det.trackId > 0) {
-                labelText = String.format(Locale.US, "%s #%d (%d%%)", det.label, det.trackId, confidencePercent);
+                labelText = String.format(Locale.US, "%s #%d (%d%%)",
+                        det.label, det.trackId, confidencePercent);
             } else {
-                labelText = String.format(Locale.US, "%s (%d%%)", det.label, confidencePercent);
+                labelText = String.format(Locale.US, "%s (%d%%)",
+                        det.label, confidencePercent);
             }
 
             float textWidth  = textPaint.measureText(labelText);
@@ -149,8 +257,6 @@ public class OverlayView extends View {
             canvas.drawText(labelText, bgLeft + padding, bgBottom - padding, textPaint);
         }
 
-        // Keep predicting between detection cycles at ~30 FPS while any
-        // track is alive; stops automatically once all tracks expire.
-        if (anyAlive) postInvalidateDelayed(33);
-    }
+        // VSync-locked 60 FPS redraw while any track is active
+        if (anyAlive) postInvalidateDelayed(40);    }
 }

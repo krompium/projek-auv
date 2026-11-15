@@ -6,6 +6,7 @@ import android.graphics.Bitmap;
 import android.graphics.SurfaceTexture;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.Looper;
 import android.util.AttributeSet;
 import android.view.LayoutInflater;
 import android.view.TextureView;
@@ -16,6 +17,7 @@ import com.dji.sdk.sample.internal.util.AdaptiveInterval;
 import com.dji.sdk.sample.internal.util.MetricsLogger;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -26,20 +28,29 @@ import dji.sdk.codec.DJICodecManager;
 
 public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextureListener {
 
+    private static final int CAPTURE_WIDTH = 640;
+    private static final int CAPTURE_HEIGHT = 360;
+
     private VideoFeeder.VideoDataListener videoDataListener = null;
     private DJICodecManager codecManager = null;
     private TextureView mVideoSurface = null;
 
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private HandlerThread processingThread;
     private Handler processingHandler;
+
     /**
-     * Frame gate. compareAndSet makes the capture decision atomic: the old
-     * volatile check-then-set had a race window against the processing
-     * thread's reset in finally{}, allowing two frames in flight.
+     * Frame gate. compareAndSet makes the capture decision atomic: only one
+     * frame is ever captured/processed at a time, making reusableCaptureBitmap
+     * completely thread-safe between capture on UI thread and read on worker.
      */
     private final AtomicBoolean isProcessingFrame = new AtomicBoolean(false);
     private volatile YoloDetector yoloDetector = null;
     private OverlayView overlayView;
+
+    // Pre-allocated mutable bitmap reused across cycles (Zero-Allocation capture)
+    private Bitmap reusableCaptureBitmap = null;
+    private final int[] sigPixelRow = new int[CAPTURE_WIDTH];
 
     private int droppedFrameCount = 0;
     private long lastCaptureStartTime = 0;
@@ -50,9 +61,10 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
     // cycle time; stretched on static scenes for thermal relief.
     private volatile long adaptiveIntervalMs = 400;
     private float emaCycleMs = 300f;
-    private int[] prevSignature = null;
-    private int staticStreak = 0;
     private static final int SIGNATURE_GRID = 8; // 8x8 luminance samples
+    private int[] prevSignature = null;
+    private final int[] currSignature = new int[SIGNATURE_GRID * SIGNATURE_GRID];
+    private int staticStreak = 0;
 
     // Callback to notify parent view of detections
     public interface DetectionCallback {
@@ -86,46 +98,78 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
                 new File(getContext().getExternalFilesDir(null), "metrics"));
         metricsLogger.logEvent("LIFECYCLE", "BaseFpvView init");
 
+        // Pre-allocate reusable capture bitmap once
+        reusableCaptureBitmap = Bitmap.createBitmap(
+                CAPTURE_WIDTH, CAPTURE_HEIGHT, Bitmap.Config.ARGB_8888);
+
         // Start background processing thread
         processingThread = new HandlerThread("YuvProcessingThread");
         processingThread.start();
         processingHandler = new Handler(processingThread.getLooper());
 
-        // Load YOLO model in background thread
+        // Load YOLO model and complete multi-pass JIT + GPU warm-up BEFORE
+        // exposing yoloDetector to the UI thread's onSurfaceTextureUpdated.
         processingHandler.post(new Runnable() {
             @Override
             public void run() {
                 try {
-                    yoloDetector = new YoloDetector(getContext().getApplicationContext());
-                    new Handler(android.os.Looper.getMainLooper()).post(new Runnable() {
+                    YoloDetector localDetector =
+                            new YoloDetector(getContext().getApplicationContext());
+                    final boolean ready = localDetector.isReady();
+                    final String initErr = localDetector.getInitError();
+                    if (metricsLogger != null) {
+                        metricsLogger.logEvent("MODEL", ready
+                                ? localDetector.getModelInfo()
+                                : "INIT FAILED: " + initErr);
+                    }
+                    if (ready) {
+                        // 8-pass warm-up: forces Android ART JIT to compile the
+                        // 409,600-pixel input loop & 8,400-anchor output loop to native
+                        // code and warms up Mali-G57 GPU shaders before live video starts.
+                        try {
+                            Bitmap warmup = Bitmap.createBitmap(
+                                    CAPTURE_WIDTH, CAPTURE_HEIGHT, Bitmap.Config.ARGB_8888);
+                            long t0 = System.currentTimeMillis();
+                            for (int i = 0; i < 2; i++) {
+                                localDetector.detect(warmup);
+                            }
+                            warmup.recycle();
+                            localDetector.reset();
+                            if (metricsLogger != null) {
+                                metricsLogger.logEvent("WARMUP",
+                                        "8-pass JIT+GPU warmup " + (System.currentTimeMillis() - t0) + " ms");
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                        // Offline parity harness (U6)
+                        DetectionHarness.runIfRequested(
+                                getContext().getApplicationContext(), localDetector, metricsLogger);
+                        localDetector.reset();
+                    }
+                    // Expose detector to UI thread ONLY after warm-up is 100% done
+                    yoloDetector = localDetector;
+                    mainHandler.post(new Runnable() {
                         @Override
                         public void run() {
-                            android.widget.Toast.makeText(getContext(),
-                                    "YOLO loaded OK!",
-                                    android.widget.Toast.LENGTH_SHORT).show();
+                            if (ready) {
+                                android.widget.Toast.makeText(getContext(),
+                                        "YOLO loaded & warmed up!",
+                                        android.widget.Toast.LENGTH_SHORT).show();
+                            } else {
+                                if (overlayView != null) {
+                                    overlayView.setDebugInfo("MODEL ERROR: " + initErr);
+                                }
+                                new android.app.AlertDialog.Builder(getContext())
+                                        .setTitle("Model gagal dimuat")
+                                        .setMessage(String.valueOf(initErr))
+                                        .setPositiveButton("OK", null)
+                                        .show();
+                            }
                         }
                     });
-                    // Warm-up inference (U9): absorbs GPU shader compilation /
-                    // DVFS ramp so the first real frame isn't a jank spike.
-                    try {
-                        Bitmap warmup = Bitmap.createBitmap(640, 360, Bitmap.Config.ARGB_8888);
-                        long t0 = System.currentTimeMillis();
-                        yoloDetector.detect(warmup);
-                        warmup.recycle();
-                        yoloDetector.reset(); // warm-up must not leave track state
-                        if (metricsLogger != null) {
-                            metricsLogger.logEvent("WARMUP",
-                                    "first inference " + (System.currentTimeMillis() - t0) + " ms");
-                        }
-                    } catch (Throwable ignored) {
-                    }
-                    // Offline parity harness (U6): one-shot replay of bundled
-                    // test images when the run_harness marker file exists.
-                    DetectionHarness.runIfRequested(
-                            getContext().getApplicationContext(), yoloDetector, metricsLogger);
                 } catch (Throwable e) {
                     final String err = e.getClass().getSimpleName() + ": " + e.getMessage();
-                    new Handler(android.os.Looper.getMainLooper()).post(new Runnable() {
+                    mainHandler.post(new Runnable() {
                         @Override
                         public void run() {
                             android.widget.Toast.makeText(getContext(),
@@ -177,9 +221,22 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
 
     private void initSDKCallback() {
         try {
-            VideoFeeder.getInstance()
-                    .getPrimaryVideoFeed()
-                    .addVideoDataListener(videoDataListener);
+            if (videoDataListener != null) {
+                VideoFeeder.getInstance()
+                        .getPrimaryVideoFeed()
+                        .addVideoDataListener(videoDataListener);
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void removeSDKCallback() {
+        try {
+            if (videoDataListener != null) {
+                VideoFeeder.getInstance()
+                        .getPrimaryVideoFeed()
+                        .removeVideoDataListener(videoDataListener);
+            }
         } catch (Exception ignored) {
         }
     }
@@ -187,6 +244,7 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
     @Override
     public void onSurfaceTextureAvailable(SurfaceTexture surface, int width, int height) {
         if (codecManager == null) {
+            // Keep 1920x1080 as verified in BUG-06 to prevent border artifacts
             codecManager = new DJICodecManager(
                     getContext().getApplicationContext(),
                     surface, 1920, 1080,
@@ -207,20 +265,39 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
 
     @Override
     public boolean onSurfaceTextureDestroyed(SurfaceTexture surface) {
+        removeSDKCallback();
         if (codecManager != null) {
             codecManager.cleanSurface();
             codecManager = null;
         }
-        if (processingThread != null) {
+        final YoloDetector detectorToClose = yoloDetector;
+        yoloDetector = null;
+        final Bitmap bitmapToRecycle = reusableCaptureBitmap;
+        reusableCaptureBitmap = null;
+
+        if (processingHandler != null && processingThread != null) {
+            processingHandler.post(new Runnable() {
+                @Override
+                public void run() {
+                    if (detectorToClose != null) {
+                        detectorToClose.close();
+                    }
+                    if (bitmapToRecycle != null && !bitmapToRecycle.isRecycled()) {
+                        bitmapToRecycle.recycle();
+                    }
+                }
+            });
             processingThread.quitSafely();
             processingThread = null;
-        }
-        if (yoloDetector != null) {
-            yoloDetector.close();
-            yoloDetector = null;
+            processingHandler = null;
+        } else {
+            if (detectorToClose != null) detectorToClose.close();
+            if (bitmapToRecycle != null && !bitmapToRecycle.isRecycled()) {
+                bitmapToRecycle.recycle();
+            }
         }
         if (overlayView != null) {
-            overlayView.updateDetections(new java.util.ArrayList<>());
+            overlayView.updateDetections(new ArrayList<YoloDetector.Detection>());
             overlayView = null;
         }
         return false;
@@ -228,8 +305,8 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
 
     @Override
     public void onSurfaceTextureUpdated(SurfaceTexture surface) {
-        if (yoloDetector == null) return;
-        if (mVideoSurface == null) return;
+        if (yoloDetector == null || !yoloDetector.isReady()) return;
+        if (mVideoSurface == null || reusableCaptureBitmap == null) return;
 
         long now = System.currentTimeMillis();
         if (now - lastCaptureStartTime < adaptiveIntervalMs) return;
@@ -242,56 +319,65 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
         }
         capturedFrameCount++;
 
-        // Measure getBitmap time on UI thread.
-        // Capture at the source 16:9 aspect (640x360) — YoloDetector letterboxes
-        // to the square model input, so no squash distortion is introduced (R2).
+        // Zero-allocation capture into pre-allocated 640x360 Bitmap on UI thread.
         long captureStart = System.currentTimeMillis();
-        final Bitmap frameBitmap = mVideoSurface.getBitmap(640, 360);
+        final Bitmap frameBitmap = mVideoSurface.getBitmap(reusableCaptureBitmap);
         final long captureMs = System.currentTimeMillis() - captureStart;
 
-        processingHandler.post(new Runnable() {
+        Handler handler = processingHandler;
+        if (handler == null) {
+            isProcessingFrame.set(false);
+            return;
+        }
+
+        handler.post(new Runnable() {
             @Override
             public void run() {
                 try {
-                    if (frameBitmap == null) {
-                        new Handler(android.os.Looper.getMainLooper()).post(() ->
-                                android.widget.Toast.makeText(getContext(),
-                                        "Frame capture null", android.widget.Toast.LENGTH_SHORT).show());
+                    YoloDetector detector = yoloDetector;
+                    if (frameBitmap == null || frameBitmap.isRecycled() || detector == null) {
+                        if (metricsLogger != null && capturedFrameCount % 25 == 1) {
+                            metricsLogger.logEvent("CAPTURE", "getBitmap returned null or closed");
+                        }
                         return;
                     }
 
-                    // Static-scene signature BEFORE inference recycles the frame
-                    int[] signature = computeSignature(frameBitmap);
+                    // Zero-allocation static-scene signature
+                    computeSignatureInPlace(frameBitmap, currSignature);
 
-                    // Measure inference time
+                    // Measure inference time; pass captureStart so tracker & overlay
+                    // compensate for the ~210 ms inference latency.
                     long inferStart = System.currentTimeMillis();
-                    List<YoloDetector.Detection> detections = yoloDetector.detect(frameBitmap);
+                    final List<YoloDetector.Detection> detections =
+                            detector.detect(frameBitmap, captureStart);
                     final long inferMs = System.currentTimeMillis() - inferStart;
-                    frameBitmap.recycle();
 
                     // Adaptive interval (U9): follow the measured cycle time,
                     // stretch on static scenes (thermal relief), snap back on motion.
                     emaCycleMs = AdaptiveInterval.updateEma(emaCycleMs, captureMs + inferMs);
-                    boolean staticScene = AdaptiveInterval.isStatic(prevSignature, signature);
-                    prevSignature = signature;
+                    boolean staticScene = AdaptiveInterval.isStatic(prevSignature, currSignature);
+                    if (prevSignature == null) {
+                        prevSignature = new int[SIGNATURE_GRID * SIGNATURE_GRID];
+                    }
+                    System.arraycopy(currSignature, 0, prevSignature, 0, currSignature.length);
                     staticStreak = staticScene ? staticStreak + 1 : 0;
-                    adaptiveIntervalMs = AdaptiveInterval.compute(emaCycleMs,
-                            staticStreak >= AdaptiveInterval.STATIC_STREAK_THRESHOLD);
+                    adaptiveIntervalMs = Math.max(400L, AdaptiveInterval.compute(emaCycleMs,
+                            staticStreak >= AdaptiveInterval.STATIC_STREAK_THRESHOLD));
 
-                    // File-based per-frame metrics (replaces Toast spam)
-                    final int activeTracks = yoloDetector.getActiveTrackCount();
-                    final int totalTrackIds = yoloDetector.getTotalTrackIdCount();
+                    // File-based per-frame metrics
+                    final int activeTracks = detector.getActiveTrackCount();
+                    final int totalTrackIds = detector.getTotalTrackIdCount();
                     if (metricsLogger != null) {
                         metricsLogger.logFrame(System.currentTimeMillis(), captureMs, inferMs,
                                 droppedFrameCount, detections.size(), activeTracks, totalTrackIds,
-                                yoloDetector.isGpuActive(), adaptiveIntervalMs);
+                                detector.isGpuActive(), adaptiveIntervalMs);
                     }
                     final String debugLine = String.format(Locale.US,
                             "cap %dms  inf %dms  drop %d  det %d  trk %d/%d",
                             captureMs, inferMs, droppedFrameCount,
                             detections.size(), activeTracks, totalTrackIds);
 
-                    new Handler(android.os.Looper.getMainLooper()).post(() -> {
+                    mainHandler.post(() -> {
                         if (overlayView != null) {
                             overlayView.setDebugInfo(debugLine);
                             overlayView.updateDetections(detections);
@@ -307,23 +393,20 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
     }
 
     /**
-     * Cheap 8x8 luminance signature for static-scene detection (U9).
-     * ~64 pixel reads per frame — negligible vs the 200 ms inference.
+     * Zero-allocation 8x8 luminance signature for static-scene detection (U9).
      */
-    private static int[] computeSignature(Bitmap bmp) {
-        if (bmp == null) return null;
-        int[] sig = new int[SIGNATURE_GRID * SIGNATURE_GRID];
+    private void computeSignatureInPlace(Bitmap bmp, int[] outSig) {
         int w = bmp.getWidth(), h = bmp.getHeight();
         int k = 0;
         for (int gy = 0; gy < SIGNATURE_GRID; gy++) {
+            int y = (int) ((gy + 0.5f) * h / SIGNATURE_GRID);
+            bmp.getPixels(sigPixelRow, 0, w, 0, y, w, 1);
             for (int gx = 0; gx < SIGNATURE_GRID; gx++) {
                 int x = (int) ((gx + 0.5f) * w / SIGNATURE_GRID);
-                int y = (int) ((gy + 0.5f) * h / SIGNATURE_GRID);
-                int p = bmp.getPixel(x, y);
-                sig[k++] = (((p >> 16) & 0xFF) * 3 + ((p >> 8) & 0xFF) * 6 + (p & 0xFF)) / 10;
+                int p = sigPixelRow[x];
+                outSig[k++] = (((p >> 16) & 0xFF) * 3 + ((p >> 8) & 0xFF) * 6 + (p & 0xFF)) / 10;
             }
         }
-        return sig;
     }
 
     private void updateTextureViewTransform() {
@@ -342,15 +425,20 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
             newH = (int)(parentW * 9f / 16f);
         }
 
-        FrameLayout.LayoutParams videoParams = new FrameLayout.LayoutParams(newW, newH);
-        videoParams.gravity = android.view.Gravity.CENTER;
-        mVideoSurface.setLayoutParams(videoParams);
+        android.view.ViewGroup.LayoutParams currentVideoLp = mVideoSurface.getLayoutParams();
+        if (currentVideoLp == null || currentVideoLp.width != newW || currentVideoLp.height != newH) {
+            FrameLayout.LayoutParams videoParams = new FrameLayout.LayoutParams(newW, newH);
+            videoParams.gravity = android.view.Gravity.CENTER;
+            mVideoSurface.setLayoutParams(videoParams);
+        }
 
         if (overlayView != null) {
-            FrameLayout.LayoutParams overlayParams = new FrameLayout.LayoutParams(newW, newH);
-            overlayParams.gravity = android.view.Gravity.CENTER;
-            overlayView.setLayoutParams(overlayParams);
+            android.view.ViewGroup.LayoutParams currentOverlayLp = overlayView.getLayoutParams();
+            if (currentOverlayLp == null || currentOverlayLp.width != newW || currentOverlayLp.height != newH) {
+                FrameLayout.LayoutParams overlayParams = new FrameLayout.LayoutParams(newW, newH);
+                overlayParams.gravity = android.view.Gravity.CENTER;
+                overlayView.setLayoutParams(overlayParams);
+            }
         }
     }
-
 }
