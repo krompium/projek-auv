@@ -22,7 +22,7 @@ public final class DetectionConfig {
      * Firebase upload gate: aligned with YOLO26n operating point so confirmed
      * detections in [0.34, 0.40) are not silently dropped from field-test logs.
      */
-    public static final float UPLOAD_CONFIDENCE_THRESHOLD = 0.34f;
+    public static final float UPLOAD_CONFIDENCE_THRESHOLD = 0.32f;
 
     /**
      * Geo-grid cell precision in decimal places for dedup keying (U10).
