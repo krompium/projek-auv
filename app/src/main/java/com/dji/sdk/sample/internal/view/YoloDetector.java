@@ -34,12 +34,14 @@ public class YoloDetector {
     private static final int DEFAULT_INPUT_SIZE = 640;
     private static final int DEFAULT_MAX_DETECTIONS = 8400;
 
-    // Gate 0.15f prevents track-ID churn (39 IDs) during camera motion at ~3.1 FPS
-    private final BoxTracker tracker = new BoxTracker(0.15f);
+    // Gate 0.15f and 8-frame memory (~3.2s) with ByteTrack 2-stage recovery
+    private final BoxTracker tracker = new BoxTracker(0.15f, 8);
 
     // Centralized in DetectionConfig (U7)
     private static final float CONFIDENCE_THRESHOLD =
             com.dji.sdk.sample.internal.util.DetectionConfig.CONFIDENCE_THRESHOLD;
+    private static final float LOW_CONFIDENCE_THRESHOLD =
+            com.dji.sdk.sample.internal.util.DetectionConfig.LOW_CONFIDENCE_THRESHOLD;
     private static final float IOU_THRESHOLD =
             com.dji.sdk.sample.internal.util.DetectionConfig.IOU_THRESHOLD;
 
@@ -90,6 +92,8 @@ public class YoloDetector {
         public final String label;
         public final float confidence;
         public int trackId;
+        /** Consecutive matched cycles (>= MIN_TRACK_HITS means confirmed). */
+        public int hits = 1;
         /** Track velocity in normalized units/second (for overlay prediction). */
         public float velocityX, velocityY;
         /** Wall-clock time (ms) the video frame was captured. */
@@ -101,6 +105,10 @@ public class YoloDetector {
             this.boundingBox = boundingBox;
             this.label = label;
             this.confidence = confidence;
+        }
+
+        public boolean isConfirmed() {
+            return trackId > 0 && hits >= com.dji.sdk.sample.internal.util.DetectionConfig.MIN_TRACK_HITS;
         }
     }
 
@@ -332,7 +340,10 @@ public class YoloDetector {
                     bestClass = c;
                 }
             }
-            if (maxScore < CONFIDENCE_THRESHOLD || bestClass < 0) continue;
+            // Collect candidates down to LOW_CONFIDENCE_THRESHOLD for ByteTrack Stage 2
+            float minGate = (tracker.getActiveCount() > 0)
+                    ? LOW_CONFIDENCE_THRESHOLD : CONFIDENCE_THRESHOLD;
+            if (maxScore < minGate || bestClass < 0) continue;
 
             float cx = output[0][i];
             float cy = output[1][i];
@@ -416,18 +427,29 @@ public class YoloDetector {
     private void assignTrackIds(List<Detection> currentDetections, long captureTimestampMs) {
         long deliveryMs = System.currentTimeMillis();
         long trackTimeMs = (captureTimestampMs > 0) ? captureTimestampMs : deliveryMs;
-        List<float[]> boxes = new ArrayList<>(currentDetections.size());
-        for (Detection d : currentDetections) {
+        int n = currentDetections.size();
+        List<float[]> boxes = new ArrayList<>(n);
+        float[] scores = new float[n];
+        for (int i = 0; i < n; i++) {
+            Detection d = currentDetections.get(i);
             boxes.add(new float[]{
                     d.boundingBox.left, d.boundingBox.top,
                     d.boundingBox.right, d.boundingBox.bottom});
+            scores[i] = d.confidence;
         }
 
-        List<BoxTracker.Assignment> assignments = tracker.assign(boxes, trackTimeMs);
-        for (int i = 0; i < currentDetections.size(); i++) {
+        List<BoxTracker.Assignment> assignments =
+                tracker.assign(boxes, scores, CONFIDENCE_THRESHOLD, trackTimeMs);
+        for (int i = n - 1; i >= 0; i--) {
             Detection d = currentDetections.get(i);
             BoxTracker.Assignment a = assignments.get(i);
+            if (a.trackId <= 0) {
+                // Unassociated low-confidence candidate: discard immediately
+                currentDetections.remove(i);
+                continue;
+            }
             d.trackId = a.trackId;
+            d.hits = a.hits;
             d.velocityX = a.vx;
             d.velocityY = a.vy;
             d.timestampMs = trackTimeMs;

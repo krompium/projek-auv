@@ -55,7 +55,33 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
     private int droppedFrameCount = 0;
     private long lastCaptureStartTime = 0;
     private int capturedFrameCount = 0;
+    private volatile long lastCaptureMs = 0;
+    private volatile long lastInferMs = 0;
     private MetricsLogger metricsLogger;
+
+    public MetricsLogger getMetricsLogger() {
+        return metricsLogger;
+    }
+
+    /** Executes disk I/O diagnostics on the background processing thread, never UI thread. */
+    public void postIoTask(Runnable task) {
+        Handler h = processingHandler;
+        if (h != null && task != null) {
+            h.post(task);
+        }
+    }
+
+    public long getLastCaptureMs() {
+        return lastCaptureMs;
+    }
+
+    public long getLastInferMs() {
+        return lastInferMs;
+    }
+
+    public int getDroppedFrameCount() {
+        return droppedFrameCount;
+    }
 
     // Adaptive capture gating (U9, R9): interval derived from the measured
     // cycle time; stretched on static scenes for thermal relief.
@@ -364,26 +390,36 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
                     adaptiveIntervalMs = Math.max(400L, AdaptiveInterval.compute(emaCycleMs,
                             staticStreak >= AdaptiveInterval.STATIC_STREAK_THRESHOLD));
 
+                    lastCaptureMs = captureMs;
+                    lastInferMs = inferMs;
+
+                    int confirmedCount = 0;
+                    for (YoloDetector.Detection d : detections) {
+                        if (d.isConfirmed()) confirmedCount++;
+                    }
+                    final int confirmedDetCount = confirmedCount;
+
                     // File-based per-frame metrics
                     final int activeTracks = detector.getActiveTrackCount();
                     final int totalTrackIds = detector.getTotalTrackIdCount();
                     if (metricsLogger != null) {
                         metricsLogger.logFrame(System.currentTimeMillis(), captureMs, inferMs,
-                                droppedFrameCount, detections.size(), activeTracks, totalTrackIds,
+                                droppedFrameCount, confirmedDetCount, activeTracks, totalTrackIds,
                                 detector.isGpuActive(), adaptiveIntervalMs);
                     }
                     final String debugLine = String.format(Locale.US,
                             "cap %dms  inf %dms  drop %d  det %d  trk %d/%d",
                             captureMs, inferMs, droppedFrameCount,
-                            detections.size(), activeTracks, totalTrackIds);
+                            confirmedDetCount, activeTracks, totalTrackIds);
 
                     mainHandler.post(() -> {
                         if (overlayView != null) {
                             overlayView.setDebugInfo(debugLine);
                             overlayView.updateDetections(detections);
                         }
-                        if (detectionCallback != null && !detections.isEmpty())
+                        if (detectionCallback != null) {
                             detectionCallback.onDetectionResult(detections);
+                        }
                     });
                 } finally {
                     isProcessingFrame.set(false);

@@ -41,4 +41,17 @@ public final class DetectionConfig {
      * 4 decimals ~= 11 m cells, matching the web dashboard's KDE/MAUP grid.
      */
     public static final int GEO_GRID_DECIMALS = 4;
+
+    /**
+     * Second-stage ByteTrack confidence floor: low-score detections in
+     * [LOW_CONFIDENCE_THRESHOLD, CONFIDENCE_THRESHOLD) never spawn new tracks,
+     * but can keep an already-confirmed track alive during motion blur.
+     */
+    public static final float LOW_CONFIDENCE_THRESHOLD = 0.20f;
+
+    /**
+     * Minimum consecutive hits before a track is considered confirmed for
+     * OverlayView rendering and Firebase/field-test counting (SORT gate).
+     */
+    public static final int MIN_TRACK_HITS = 2;
 }

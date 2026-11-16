@@ -83,14 +83,13 @@ public class OverlayView extends View {
 
     public void updateDetections(List<YoloDetector.Detection> newDetections) {
         if (newDetections != null && !newDetections.isEmpty()) {
-            // Merge: keep coasting tracks from previous cycle if they only missed 1 frame
             long now = System.currentTimeMillis();
             List<YoloDetector.Detection> merged = new ArrayList<>(newDetections);
             for (YoloDetector.Detection oldDet : this.detections) {
-                if (oldDet.trackId <= 0) continue;
+                if (!oldDet.isConfirmed()) continue;
                 long refTs = (oldDet.deliveryTimestampMs > 0)
                         ? oldDet.deliveryTimestampMs : oldDet.timestampMs;
-                if (now - refTs > 450) continue; // coast at most 1 missed cycle (~320 ms)
+                if (now - refTs > 450) continue;
                 boolean stillPresent = false;
                 for (YoloDetector.Detection nd : newDetections) {
                     if (nd.trackId == oldDet.trackId) {
@@ -102,14 +101,12 @@ public class OverlayView extends View {
             }
             this.detections = merged;
         } else {
-            // If 0 detections in this frame, keep active tracks coasting for up to 450 ms
-            // instead of blinking the screen blank immediately on a 1-frame miss.
             long now = System.currentTimeMillis();
             List<YoloDetector.Detection> surviving = new ArrayList<>();
             for (YoloDetector.Detection oldDet : this.detections) {
                 long refTs = (oldDet.deliveryTimestampMs > 0)
                         ? oldDet.deliveryTimestampMs : oldDet.timestampMs;
-                if (oldDet.trackId > 0 && (now - refTs) <= 450) {
+                if (oldDet.isConfirmed() && (now - refTs) <= 450) {
                     surviving.add(oldDet);
                 }
             }
@@ -150,6 +147,9 @@ public class OverlayView extends View {
 
         for (YoloDetector.Detection det : currentDetections) {
             if (det.boundingBox == null) continue;
+            // SORT Confirmation Gate: hanya gambar objek yang sudah terkonfirmasi (hits >= 2)
+            // sebelum membuat TrackVisualState agar muncul tepat di posisi objek saat ini.
+            if (!det.isConfirmed()) continue;
 
             // Expiration is checked against delivery time so boxes don't blink
             // out while waiting for the next ~210 ms inference to complete.
@@ -188,7 +188,8 @@ public class OverlayView extends View {
                     st.lastDrawnCy = predCy;
                     trackStates.put(det.trackId, st);
                 } else if (det.timestampMs != st.lastCaptureTs) {
-                    st.seenCycles++;
+                    // New detection cycle arrived: capture jump residual so it
+                    // decays smoothly over 110 ms without steady-state lag.
                     st.resCx = st.lastDrawnCx - predCx;
                     st.resCy = st.lastDrawnCy - predCy;
                     st.blendStartMs = now;
@@ -197,7 +198,11 @@ public class OverlayView extends View {
                     st.smoothH += SIZE_SMOOTH_ALPHA * (rawH - st.smoothH);
                 }
 
-                if (st.seenCycles < 2) continue;
+                // SORT Confirmation Gate: only render once track is confirmed
+                // (hits >= MIN_TRACK_HITS), matching Firebase upload criteria 100%.
+                if (det.hits < com.dji.sdk.sample.internal.util.DetectionConfig.MIN_TRACK_HITS) {
+                    continue;
+                }
 
                 float u = (now - st.blendStartMs) / BLEND_DURATION_MS;
                 float decay = (u >= 1f) ? 0f : (u <= 0f ? 1f : (1f - u) * (1f - u) * (1f - u));
