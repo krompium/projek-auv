@@ -123,6 +123,15 @@ public class YoloDetector {
             try (CompatibilityList compatList = new CompatibilityList()) {
                 if (compatList.isDelegateSupportedOnThisDevice()) {
                     GpuDelegate.Options delegateOptions = compatList.getBestOptionsForThisDevice();
+                    delegateOptions.setPrecisionLossAllowed(true);
+                    delegateOptions.setInferencePreference(
+                            GpuDelegate.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED);
+                    java.io.File cacheDir = context.getCodeCacheDir();
+                    if (cacheDir != null && modelBuffer != null) {
+                        delegateOptions.setSerializationParams(
+                                cacheDir.getAbsolutePath(),
+                                MODEL_FILE + "_" + modelBuffer.capacity());
+                    }
                     gpuDelegate = new GpuDelegate(delegateOptions);
                     options.addDelegate(gpuDelegate);
                 } else {

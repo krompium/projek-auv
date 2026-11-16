@@ -200,7 +200,8 @@ public class ObjectDetectionView extends FrameLayout implements PresentableView,
             // SORT Gate: hanya objek terkonfirmasi (hits >= MIN_TRACK_HITS) yang dihitung,
             // sehingga 100% sinkron dengan kotak yang digambar di OverlayView.
             if (!d.isConfirmed()) continue;
-//            if (d.confidence < DetectionConfig.UPLOAD_CONFIDENCE_THRESHOLD) continue;
+            if (d.hits <= DetectionConfig.MIN_TRACK_HITS
+                    && d.confidence < DetectionConfig.UPLOAD_CONFIDENCE_THRESHOLD) continue;
 
             confirmedIds[confirmedCount] = d.trackId;
             confirmedConfs[confirmedCount] = d.confidence;

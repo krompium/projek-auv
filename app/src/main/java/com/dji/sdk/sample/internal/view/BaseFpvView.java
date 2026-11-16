@@ -158,12 +158,13 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
                             long t0 = System.currentTimeMillis();
                             for (int i = 0; i < 2; i++) {
                                 localDetector.detect(warmup);
+                                Thread.sleep(150);
                             }
                             warmup.recycle();
                             localDetector.reset();
                             if (metricsLogger != null) {
                                 metricsLogger.logEvent("WARMUP",
-                                        "8-pass JIT+GPU warmup " + (System.currentTimeMillis() - t0) + " ms");
+                                        "2-pass JIT+GPU warmup " + (System.currentTimeMillis() - t0) + " ms");
                             }
                         } catch (Throwable ignored) {
                         }
@@ -173,6 +174,7 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
                         localDetector.reset();
                     }
                     // Expose detector to UI thread ONLY after warm-up is 100% done
+                    lastCaptureStartTime = System.currentTimeMillis();
                     yoloDetector = localDetector;
                     mainHandler.post(new Runnable() {
                         @Override
@@ -387,7 +389,8 @@ public class BaseFpvView extends FrameLayout implements TextureView.SurfaceTextu
                     }
                     System.arraycopy(currSignature, 0, prevSignature, 0, currSignature.length);
                     staticStreak = staticScene ? staticStreak + 1 : 0;
-                    adaptiveIntervalMs = Math.max(400L, AdaptiveInterval.compute(emaCycleMs,
+                    long minSafeInterval = Math.max(400L, captureMs + inferMs + 180L);
+                    adaptiveIntervalMs = Math.max(minSafeInterval, AdaptiveInterval.compute(emaCycleMs,
                             staticStreak >= AdaptiveInterval.STATIC_STREAK_THRESHOLD));
 
                     lastCaptureMs = captureMs;
