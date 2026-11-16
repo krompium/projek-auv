@@ -34,7 +34,7 @@ public final class DetectionConfig {
      * Firestore. Kept >= CONFIDENCE_THRESHOLD so uploads are a strict subset
      * of what the pilot sees on the overlay.
      */
-    public static final float UPLOAD_CONFIDENCE_THRESHOLD = 0.40f;
+    public static final float UPLOAD_CONFIDENCE_THRESHOLD = 0.38f;
 
     /**
      * Geo-grid cell precision in decimal places for dedup keying (U10).
